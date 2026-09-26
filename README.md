@@ -52,6 +52,35 @@ python main.py "summarize the repo layout" \
 - `--checkpoint NAME` - tar the project root to `~/.mule/checkpoints/`
   before the run (skips .git and caches)
 - `--restore NAME` - restore a checkpoint over the project root and exit
+- `--json` - print the result as json (answer, steps, tokens, cost)
+  for scripting; info lines go to stderr so stdout stays pure json
+- `--dry-run` - run the loop but never execute tools: each planned
+  call prints as `dry run, not executed: name(args)` instead
+- `--system TEXT` - replace the system prompt with this text
+- `--append-system TEXT` - append extra instructions to the system prompt
+- `--no-color` - disable ansi colors (also honors the NO_COLOR env var)
+
+## subcommands
+
+- `mule init [--force]` - scaffold a project: writes a starter
+  `mule.json`, a `prompt.md` template, and an example command in
+  `.mule/commands/`. refuses to overwrite unless `--force`.
+- `mule config [--global] get KEY | set KEY VALUE | unset KEY | list`
+  - read and write config values from the cli. writes the local
+  `mule.json` by default, `--global` targets `~/.config/mule/mule.json`.
+  values that look like json become json (`set max_steps 40` stores
+  the number 40).
+- `mule doctor [--root DIR]` - sanity checklist: configs parse, an
+  api key is set (never printed), the base url answers, the project
+  root exists. exits 1 when anything fails.
+- `mule completion bash|zsh|fish` - print a completion script for
+  your shell. the flag list is generated from the real parser so it
+  never drifts.
+- `mule models` - table of priced models ($/1M tokens in/out) from
+  `cost.py`, no api call needed.
+
+the task can also come from stdin: `echo "fix the bug" | mule`
+or `mule -` reads it explicitly.
 
 ## config file
 
@@ -73,7 +102,8 @@ precedence: flags beat env vars (`MULE_MODEL`, `MULE_BASE_URL`,
 `MULE_MAX_STEPS`, `MULE_TIMEOUT`, `MULE_RETRIES`, `MULE_CONTEXT_BUDGET`, `OPENAI_API_KEY`) beat the local
 config beat the global config beat the built-in defaults. you can
 put `api_key` in the config, but an env var is safer than a key
-sitting in a file.
+sitting in a file. manage values without opening an editor:
+`mule config set model gpt-4o-mini`, `mule config list`.
 
 responses stream by default: tokens print as they arrive. pass
 `--no-stream` to go back to waiting for the whole reply.
@@ -151,8 +181,9 @@ blocks, cost at the bottom.
 
 `agent.py` runs the loop: send messages, take the model's tool calls,
 run them, feed results back, repeat. it also handles plan approval,
-todo progress lines, context compaction, and running several tool
-calls from one turn in order. `tools.py` has ten tools -
+todo progress lines, context compaction, running several tool
+calls from one turn in order, and `--dry-run` (planned calls print
+instead of executing). `tools.py` has ten tools -
 read_file, write_file, edit_file, list_dir, run_shell, fetch_url,
 web_search, todo_write, todo_read, read_image - all sandboxed to
 `--root` so the agent can't wander out of the project dir (fetch_url
@@ -165,7 +196,11 @@ as jsonl files under `~/.mule/sessions/` and exports them to
 markdown. `checkpoints.py` tars and restores project snapshots.
 `prompt.md` is the system prompt. `repl.py` runs the
 `--interactive` prompt loop, its slash commands, and custom
-commands from `.mule/commands/`.
+commands from `.mule/commands/`. `scaffold.py` powers `mule init`.
+`doctor.py` runs the `mule doctor` checklist. `complete.py`
+generates the shell completion scripts from the real argument
+parser. `ui.py` is the tiny ansi color layer, off with
+`--no-color` or NO_COLOR.
 
 ## tools
 
