@@ -122,6 +122,57 @@ def session_stats():
     return stats
 
 
+def import_history(path):
+    # start from an old conversation: .jsonl session files load
+    # directly, .md transcripts (from --export) parse back into
+    # user/assistant messages. tool blocks don't round-trip.
+    if path.endswith(".jsonl"):
+        messages = []
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    messages.append(json.loads(line))
+        return messages
+    if path.endswith(".md"):
+        return _import_markdown(path)
+    raise ValueError("cannot import %s: use a .md or .jsonl file" % path)
+
+
+def _import_markdown(path):
+    messages = []
+    role, buf, in_fence = None, [], False
+
+    def flush():
+        text = "\n".join(buf).strip()
+        if role and text:
+            messages.append({"role": role, "content": text})
+
+    with open(path) as f:
+        for line in f:
+            s = line.rstrip("\n")
+            if s.startswith("```"):
+                if in_fence:
+                    flush()
+                    role, buf = None, []
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue  # tool calls don't round-trip
+            if s == "## user":
+                flush()
+                role, buf = "user", []
+            elif s == "## assistant":
+                flush()
+                role, buf = "assistant", []
+            elif s.startswith("#") or s.startswith(">"):
+                continue
+            else:
+                buf.append(s)
+    flush()
+    return messages
+
+
 def export_session(path, messages, cost_line=None):
     # readable markdown transcript: turns, tool calls, cost at the bottom
     lines = ["# mule session", ""]

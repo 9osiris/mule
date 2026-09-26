@@ -839,6 +839,17 @@ def main(argv=None):
             return 1
         if not args.quiet and not args.print_mode:
             say(args, "forked from session: %s" % args.fork)
+    if args.import_ and messages is None:
+        # start from a markdown or jsonl history file
+        from sessions import import_history
+        try:
+            messages = import_history(args.import_)
+        except (ValueError, OSError) as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return 1
+        if not args.quiet and not args.print_mode:
+            say(args, "imported %d messages from %s"
+                      % (len(messages), args.import_))
     if args.cont and messages is None:
         latest = latest_session()
         if latest is None:

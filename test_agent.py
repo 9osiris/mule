@@ -2809,6 +2809,62 @@ check("--template wraps the task end to end",
       _rc == 0
       and _seen_task["task"].startswith("review this:\n\nmain.py\n\nbe blunt."))
 
+# --import FILE: markdown and jsonl histories
+
+from sessions import import_history
+
+_imp_dir = tempfile.mkdtemp()
+_imp_jsonl = os.path.join(_imp_dir, "old.jsonl")
+with open(_imp_jsonl, "w") as _jf:
+    _jf.write('{"role": "user", "content": "hi"}\n')
+    _jf.write('{"role": "assistant", "content": "hello"}\n')
+_imp_md = os.path.join(_imp_dir, "old.md")
+with open(_imp_md, "w") as _mf:
+    _mf.write("# mule session\n\n## user\n\nfix the bug\n\n"
+              "## assistant\n\nfixed it\n\n```\nread_file {}\n```\n")
+_jl = import_history(_imp_jsonl)
+check("--import reads jsonl histories",
+      _jl == [{"role": "user", "content": "hi"},
+              {"role": "assistant", "content": "hello"}])
+_md = import_history(_imp_md)
+check("--import reads markdown transcripts",
+      _md == [{"role": "user", "content": "fix the bug"},
+              {"role": "assistant", "content": "fixed it"}])
+try:
+    import_history(os.path.join(_imp_dir, "old.txt"))
+    _imp_bad = False
+except ValueError as _e:
+    _imp_bad = "use a .md or .jsonl file" in str(_e)
+check("--import rejects other extensions", _imp_bad)
+check("--import parses", parse_args(["t", "--import", "x.md"]).import_ == "x.md")
+
+# --import end to end: the old messages lead the new run
+_seen_hist = {}
+
+
+class _ImpClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        _seen_hist["first"] = messages[0]
+        return {"role": "assistant", "content": "done",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _ImpClient
+with contextlib.redirect_stdout(io.StringIO()):
+    _rc = _main_mod.main(["next task", "--import", _imp_md, "--api-key", "x",
+                          "--root", tempfile.mkdtemp(), "--print"])
+_main_mod.ChatClient = _real_client
+check("--import seeds the run with old messages",
+      _rc == 0 and _seen_hist["first"] == {"role": "user",
+                                           "content": "fix the bug"})
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
