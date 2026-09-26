@@ -3,7 +3,7 @@ import json
 import os
 import sys
 
-from agent import run, last_answer, load_system_prompt
+from agent import run, last_answer, load_system_prompt, plan_and_approve
 from client import ChatClient
 from config import load_config
 from cost import cost_for, fmt_cost
@@ -71,6 +71,18 @@ def parse_args(argv=None):
                    help="restore the most recently changed file and exit")
     p.add_argument("--interactive", action="store_true",
                    help="prompt loop for follow-up tasks")
+    p.add_argument("--plan", action="store_true",
+                   help="write a plan and get your approval before running tools")
+    p.add_argument("--context-budget", type=int,
+                   default=_num(os.environ.get("MULE_CONTEXT_BUDGET"),
+                                cfg.get("context_budget"), 100000, int),
+                   help="compact history past this many chars (default: 100000)")
+    p.add_argument("--export", default=None, metavar="PATH",
+                   help="write the session transcript to a markdown file")
+    p.add_argument("--checkpoint", default=None, metavar="NAME",
+                   help="tar the project root to ~/.mule/checkpoints/ before the run")
+    p.add_argument("--restore", default=None, metavar="NAME",
+                   help="restore a checkpoint and exit")
     return p.parse_args(argv)
 
 
@@ -79,6 +91,16 @@ def ask_cmd(command):
     print("run this? %s" % command)
     ans = input("[y/N] ").strip().lower()
     return ans in ("y", "yes")
+
+
+def ask_plan(plan):
+    # the human-in-the-loop gate for --plan
+    print("plan:")
+    print(plan)
+    ans = input("[y]es / [n]o / [r]evise: ").strip().lower()
+    if ans in ("r", "revise"):
+        return "r"
+    return "y" if ans in ("y", "yes") else "n"
 
 
 def make_chat_fn(args, client):
@@ -112,6 +134,13 @@ def make_show(args):
     return show
 
 
+def make_todos(args):
+    def show_todos(line):
+        if not args.quiet:
+            print(line)
+    return show_todos
+
+
 def make_track(args, totals):
     def track(step, usage):
         # returns True when the cost budget is blown, stopping the loop
@@ -133,7 +162,7 @@ def make_track(args, totals):
 
 
 def run_interactive(args, tools, system, messages, task,
-                    chat_fn, show, track, totals):
+                    chat_fn, show, track, totals, todos):
     # prompt loop: each line is a task, history carries over
     box = {"messages": messages}
 
@@ -157,7 +186,9 @@ def run_interactive(args, tools, system, messages, task,
                                   max_steps=args.max_steps,
                                   on_step=show,
                                   messages=box["messages"],
-                                  usage_cb=track)
+                                  usage_cb=track,
+                                  on_todos=todos,
+                                  context_budget=args.context_budget)
         except RuntimeError as e:
             print("error: %s" % e)
             return
@@ -169,6 +200,15 @@ def run_interactive(args, tools, system, messages, task,
         # a task on the command line runs first, then the loop takes over
         on_task(task)
     repl_loop(input, print, on_task, on_slash)
+    if args.export:
+        from sessions import export_session
+        export_session(args.export, box["messages"],
+                       cost_line="tokens: %s in / %s out, cost %s" % (
+                           "{:,}".format(totals["in"]),
+                           "{:,}".format(totals["out"]),
+                           fmt_cost(cost_for(args.model, totals["in"],
+                                             totals["out"]))))
+        print("exported: %s" % args.export)
     return 0
 
 
@@ -184,6 +224,20 @@ def main(argv=None):
     if args.undo:
         print(tools.undo_last())
         return 0
+    if args.restore:
+        from checkpoints import restore_checkpoint
+        try:
+            path = restore_checkpoint(args.root, args.restore)
+        except ValueError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 1
+        print("restored checkpoint: %s" % path)
+        return 0
+    if args.checkpoint:
+        from checkpoints import save_checkpoint
+        path = save_checkpoint(args.root, args.checkpoint)
+        if not args.quiet:
+            print("checkpoint saved: %s" % path)
 
     task = args.task
     if not task and not args.interactive and not sys.stdin.isatty():
@@ -213,18 +267,30 @@ def main(argv=None):
     show = make_show(args)
     totals = {"in": 0, "out": 0}
     track = make_track(args, totals)
+    todos = make_todos(args)
 
     if args.interactive:
         return run_interactive(args, tools, system, messages, task,
-                               chat_fn, show, track, totals)
+                               chat_fn, show, track, totals, todos)
+
+    run_task, run_messages = task, messages
+    if args.plan:
+        run_messages, approved = plan_and_approve(
+            task, chat_fn, ask_plan, system, messages=messages)
+        if not approved:
+            print("plan rejected, stopping")
+            return 0
+        run_task = None  # the task is already in the history
 
     try:
-        messages = run(task, chat_fn, tools,
+        messages = run(run_task, chat_fn, tools,
                        system_prompt=system,
                        max_steps=args.max_steps,
                        on_step=show,
-                       messages=messages,
-                       usage_cb=track)
+                       messages=run_messages,
+                       usage_cb=track,
+                       on_todos=todos,
+                       context_budget=args.context_budget)
     except RuntimeError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
@@ -235,11 +301,18 @@ def main(argv=None):
         if not args.quiet:
             print("saved session: %s" % path)
 
+    cost_line = "tokens: %s in / %s out, cost %s" % (
+        "{:,}".format(totals["in"]), "{:,}".format(totals["out"]),
+        fmt_cost(cost_for(args.model, totals["in"], totals["out"])))
+    if args.export:
+        from sessions import export_session
+        export_session(args.export, messages, cost_line=cost_line)
+        if not args.quiet:
+            print("exported: %s" % args.export)
+
     if not args.quiet:
         print("---")
-        print("tokens: %s in / %s out, cost %s" % (
-            "{:,}".format(totals["in"]), "{:,}".format(totals["out"]),
-            fmt_cost(cost_for(args.model, totals["in"], totals["out"]))))
+        print(cost_line)
     print(last_answer(messages))
     return 0
 

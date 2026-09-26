@@ -30,8 +30,70 @@ def load_system_prompt(path=None):
     return SYSTEM_PROMPT
 
 
+def plan_and_approve(task, chat, decide, system_prompt=None,
+                     messages=None):
+    """ask the model for a plan first. decide(plan) -> "y"/"n"/"r".
+
+    returns (messages, approved). approved is False when the user
+    rejects or burns their one revision without approving."""
+    if messages is None:
+        messages = [
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
+        ]
+    else:
+        messages = list(messages)
+    messages.append({
+        "role": "user",
+        "content": task + "\n\nfirst, write a short plan: the steps you "
+                   "will take. do not call any tools yet.",
+    })
+    revised = False
+    while True:
+        reply = chat(messages, [])
+        plan = (reply.get("content") or "").strip()
+        messages.append(_clean_reply(reply))
+        answer = decide(plan)
+        if answer == "y":
+            return messages, True
+        if answer == "r" and not revised:
+            revised = True
+            messages.append({
+                "role": "user",
+                "content": "revise the plan and try again.",
+            })
+            continue
+        return messages, False
+
+
+def context_size(messages):
+    # rough char count of the whole history
+    return len(json.dumps(messages))
+
+
+def compact_messages(messages, chat, keep_last=10):
+    # squash the oldest messages into one summary, keep the
+    # system prompt and the recent tail intact
+    head = 1 if (messages and messages[0].get("role") == "system") else 0
+    if len(messages) <= head + keep_last + 1:
+        return messages
+    middle = messages[head:-keep_last]
+    tail = messages[-keep_last:]
+    reply = chat([
+        {"role": "system",
+         "content": "summarize the conversation below in a few sentences. "
+                    "keep file names, decisions made, and anything unfinished."},
+        {"role": "user", "content": json.dumps(middle)},
+    ], [])
+    summary = (reply.get("content") or "").strip() or "(no summary)"
+    out = messages[:head]
+    out.append({"role": "user",
+                "content": "[earlier context summarized]\n" + summary})
+    out.extend(tail)
+    return out
+
+
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
-        messages=None, usage_cb=None):
+        messages=None, usage_cb=None, on_todos=None, context_budget=None):
     """the loop. chat(messages) -> assistant message dict, tools is a ToolSet."""
     if messages is None:
         messages = [
@@ -44,7 +106,14 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
     else:
         messages = list(messages)
 
+    last_todos = None
+
     for step in range(max_steps):
+        if (context_budget and context_size(messages) > context_budget
+                and len(messages) > 12):
+            # history got too big, squash the old stuff down
+            messages = compact_messages(messages, chat)
+
         reply = chat(messages, tools.schemas())
         stop = usage_cb(step + 1, reply.get("usage")) if usage_cb else False
         messages.append(_clean_reply(reply))
@@ -75,6 +144,12 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
                 "tool_call_id": call["id"],
                 "content": str(result),
             })
+
+        if on_todos and hasattr(tools, "progress_line"):
+            line = tools.progress_line()
+            if line and line != last_todos:
+                last_todos = line
+                on_todos(line)
 
         if on_step:
             on_step(step + 1, calls)

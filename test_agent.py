@@ -971,6 +971,87 @@ check("--interactive parses",
       parse_args(["--interactive"]).interactive is True)
 check("--undo parses", parse_args(["--undo"]).undo is True)
 
+# plan mode: approve, reject, revise
+
+from agent import plan_and_approve, context_size, compact_messages
+
+pscript = [
+    {"role": "assistant", "content": "plan: 1. write the file"},
+    {"role": "assistant", "tool_calls": [tool_call("p1", "write_file",
+            {"path": "p.txt", "content": "planned"})]},
+    {"role": "assistant", "content": "done per plan"},
+]
+pstate = {"n": 0, "saw_tools": []}
+
+
+def pchat(messages, tools):
+    pstate["saw_tools"].append(tools)
+    reply = pscript[pstate["n"]]
+    pstate["n"] += 1
+    return reply
+
+
+proot = tempfile.mkdtemp()
+ptools = ToolSet(proot)
+pmsgs, pok = plan_and_approve("do the thing", pchat, lambda plan: "y",
+                              system_prompt="t")
+check("plan approved", pok is True)
+check("plan phase made no tool calls", pstate["saw_tools"][0] == [])
+check("plan is in the history",
+      any("plan: 1. write the file" in (m.get("content") or "")
+          for m in pmsgs))
+pmsgs = run(None, pchat, ptools, messages=pmsgs, max_steps=5)
+check("approved plan leads to tool calls",
+      open(os.path.join(proot, "p.txt")).read() == "planned")
+check("loop finished after the plan",
+      last_answer(pmsgs) == "done per plan")
+
+
+def rchat(messages, tools):
+    rchat.n += 1
+    return {"role": "assistant", "content": "a plan"}
+rchat.n = 0
+
+_, rok = plan_and_approve("task", rchat, lambda plan: "n",
+                          system_prompt="t")
+check("plan rejected", rok is False)
+check("rejected plan stops before any tools", rchat.n == 1)
+
+
+vanswers = iter(["r", "y"])
+vplans = []
+
+
+def vdecide(plan):
+    vplans.append(plan)
+    return next(vanswers)
+
+
+def vchat(messages, tools):
+    vchat.n += 1
+    return {"role": "assistant",
+            "content": "plan v%d" % vchat.n}
+vchat.n = 0
+
+vmsgs, vok = plan_and_approve("task", vchat, vdecide, system_prompt="t")
+check("revise asks the model once more", vchat.n == 2 and vok is True)
+check("revision request is in the history",
+      any("revise the plan" in (m.get("content") or "") for m in vmsgs))
+check("decide saw both plans", vplans == ["plan v1", "plan v2"])
+
+
+def wchat(messages, tools):
+    wchat.n += 1
+    return {"role": "assistant", "content": "plan v%d" % wchat.n}
+wchat.n = 0
+
+_, wok = plan_and_approve("task", wchat, lambda plan: "r",
+                          system_prompt="t")
+check("a second revise counts as a reject",
+      wok is False and wchat.n == 2)
+
+check("--plan parses", parse_args(["--plan", "t"]).plan is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
