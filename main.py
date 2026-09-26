@@ -5,21 +5,48 @@ import sys
 
 from agent import run, last_answer, load_system_prompt
 from client import ChatClient
+from config import load_config
 from cost import cost_for, fmt_cost
 from sessions import save_session, load_session, list_sessions, auto_name
 from tools import ToolSet
 
 
+def _num(env_raw, cfg_raw, default, cast):
+    # env beats config beats default, junk falls through to default
+    for raw in (env_raw, cfg_raw):
+        if raw is None:
+            continue
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
 def parse_args(argv=None):
+    cfg = load_config()
     p = argparse.ArgumentParser(
         description="a minimal coding agent for any openai-compatible api")
     p.add_argument("task", nargs="?", help="what to do, or read from stdin")
-    p.add_argument("--model", default=os.environ.get("MULE_MODEL", "gpt-4o-mini"))
-    p.add_argument("--base-url", default=os.environ.get("MULE_BASE_URL",
-                                                       "https://api.openai.com/v1"))
-    p.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY", ""))
-    p.add_argument("--root", default=".", help="project dir the agent works in")
-    p.add_argument("--max-steps", type=int, default=25)
+    p.add_argument("--model",
+                   default=os.environ.get("MULE_MODEL",
+                                          cfg.get("model", "gpt-4o-mini")))
+    p.add_argument("--base-url",
+                   default=os.environ.get("MULE_BASE_URL",
+                                          cfg.get("base_url",
+                                                  "https://api.openai.com/v1")))
+    p.add_argument("--api-key",
+                   default=os.environ.get("OPENAI_API_KEY",
+                                          cfg.get("api_key", "")))
+    p.add_argument("--root", default=cfg.get("root", "."),
+                   help="project dir the agent works in")
+    p.add_argument("--max-steps", type=int,
+                   default=_num(os.environ.get("MULE_MAX_STEPS"),
+                                cfg.get("max_steps"), 25, int))
+    p.add_argument("--timeout", type=float,
+                   default=_num(os.environ.get("MULE_TIMEOUT"),
+                                cfg.get("timeout"), 120, float),
+                   help="api request timeout in seconds")
     p.add_argument("--system-prompt", default=None)
     p.add_argument("--quiet", action="store_true", help="only print the final answer")
     p.add_argument("--no-stream", action="store_true",
@@ -62,7 +89,8 @@ def main(argv=None):
         return 2
 
     tools = ToolSet(args.root, confirm=ask_cmd if args.ask else None)
-    client = ChatClient(args.base_url, args.api_key, args.model)
+    client = ChatClient(args.base_url, args.api_key, args.model,
+                        timeout=args.timeout)
     system = load_system_prompt(args.system_prompt)
 
     messages = None

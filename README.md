@@ -39,6 +39,29 @@ python main.py "summarize the repo layout" \
 - `--resume NAME` - resume a saved session, then continue with the task
 - `--list-sessions` - list saved sessions and exit
 - `--ask` - ask for confirmation before each shell command
+- `--timeout SEC` - api request timeout (default: 120)
+
+## config file
+
+`mule.json` in the current directory sets defaults, and
+`~/.config/mule/mule.json` sets global ones. the local file wins
+over the global one. recognized keys: `model`, `base_url`,
+`api_key`, `max_steps`, `timeout`, `root`.
+
+```json
+{
+  "model": "qwen2.5-coder",
+  "base_url": "http://localhost:11434/v1",
+  "api_key": "ollama",
+  "max_steps": 40
+}
+```
+
+precedence: flags beat env vars (`MULE_MODEL`, `MULE_BASE_URL`,
+`MULE_MAX_STEPS`, `MULE_TIMEOUT`, `OPENAI_API_KEY`) beat the local
+config beat the global config beat the built-in defaults. you can
+put `api_key` in the config, but an env var is safer than a key
+sitting in a file.
 
 responses stream by default: tokens print as they arrive. pass
 `--no-stream` to go back to waiting for the whole reply.

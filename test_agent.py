@@ -501,6 +501,65 @@ builtins.input = lambda *a: ""
 check("ask_cmd empty is no", ask_cmd("ls") is False)
 builtins.input = real_input
 
+# config file: home < local < env < flag
+
+import config
+
+home_cfg = os.path.join(tempfile.mkdtemp(), "mule.json")
+local_cfg = os.path.join(tempfile.mkdtemp(), "mule.json")
+with open(home_cfg, "w") as f:
+    json.dump({"model": "home-model", "max_steps": 5, "timeout": 10}, f)
+with open(local_cfg, "w") as f:
+    json.dump({"model": "local-model", "base_url": "http://local/v1",
+               "nope": 1}, f)
+config.HOME_CONFIG = home_cfg
+config.LOCAL_CONFIG = local_cfg
+
+cfg = config.load_config()
+check("local config beats home", cfg["model"] == "local-model")
+check("home-only keys survive",
+      cfg["max_steps"] == 5 and cfg["base_url"] == "http://local/v1")
+check("unknown keys dropped", "nope" not in cfg)
+
+config.HOME_CONFIG = "/nonexistent/mule.json"
+config.LOCAL_CONFIG = "/nonexistent/mule.json"
+check("missing configs give empty", config.load_config() == {})
+
+with open(local_cfg, "w") as f:
+    f.write("not json{")
+config.LOCAL_CONFIG = local_cfg
+check("broken config json gives empty", config.load_config() == {})
+
+# precedence through parse_args
+with open(home_cfg, "w") as f:
+    json.dump({"model": "cfg-model"}, f)
+with open(local_cfg, "w") as f:
+    json.dump({"model": "cfg-model"}, f)
+config.HOME_CONFIG = home_cfg
+config.LOCAL_CONFIG = local_cfg
+
+old_env = dict(os.environ)
+try:
+    os.environ.pop("MULE_MODEL", None)
+    check("config fills model default",
+          parse_args(["task"]).model == "cfg-model")
+    os.environ["MULE_MODEL"] = "env-model"
+    check("env beats config", parse_args(["task"]).model == "env-model")
+    check("flag beats env",
+          parse_args(["task", "--model", "flag-model"]).model
+          == "flag-model")
+finally:
+    os.environ.clear()
+    os.environ.update(old_env)
+
+config.HOME_CONFIG = "/nonexistent/mule.json"
+config.LOCAL_CONFIG = "/nonexistent/mule.json"
+check("--timeout defaults to 120", parse_args(["task"]).timeout == 120)
+check("--timeout parses",
+      parse_args(["task", "--timeout", "30"]).timeout == 30)
+check("--max-steps still defaults to 25",
+      parse_args(["task"]).max_steps == 25)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
