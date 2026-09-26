@@ -207,6 +207,68 @@ check("other base urls do not send originator header",
       "Originator" not in plain_heads)
 hserver.shutdown()
 
+# retry nudges never split tool results: every tool call must sit
+# right next to its result, some gateways reject anything wedged
+# between them when translating to other api shapes
+
+RRESPONSES = [
+    {"choices": [{"message": {
+        "role": "assistant", "content": None,
+        "tool_calls": [
+            {"id": "r1", "type": "function",
+             "function": {"name": "nope_missing",
+                          "arguments": "{}"}},
+            {"id": "r2", "type": "function",
+             "function": {"name": "write_file",
+                          "arguments": json.dumps({"path": "ok.txt",
+                                                   "content": "x"})}},
+        ]}}]},
+    {"choices": [{"message": {
+        "role": "assistant", "content": "done"}}]},
+]
+rseen = {"bodies": []}
+
+
+class RetryHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        rseen["bodies"].append(json.loads(self.rfile.read(length)))
+        body = RRESPONSES.pop(0)
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+rserver = HTTPServer(("127.0.0.1", 0), RetryHandler)
+threading.Thread(target=rserver.serve_forever, daemon=True).start()
+rroot = tempfile.mkdtemp()
+rclient = ChatClient("http://127.0.0.1:%d/v1" % rserver.server_port,
+                     "fake-key", "fake-model")
+rtools = ToolSet(rroot)
+rmsgs = run("do the things", rclient.chat, rtools,
+            system_prompt="t", max_steps=5)
+rserver.shutdown()
+
+rm = rseen["bodies"][1]["messages"]
+r_asst = next(i for i, m in enumerate(rm)
+              if m.get("role") == "assistant" and m.get("tool_calls"))
+r_after = rm[r_asst + 1:]
+r_tools = [m for m in r_after if m["role"] == "tool"]
+check("both tool results present", len(r_tools) == 2)
+check("tool results stay adjacent to the assistant message",
+      [m["role"] for m in r_after[:2]] == ["tool", "tool"])
+check("retry nudge comes after all results",
+      r_after[2]["role"] == "user" and "failed" in r_after[2]["content"])
+check("retry still only fires once per call",
+      sum(1 for m in rmsgs if m.get("role") == "user"
+          and "failed" in m.get("content", "")) == 1)
+
 # assistant messages echoed back always carry a content field, even
 # when the model only returned tool calls (some gateways 422 without it)
 

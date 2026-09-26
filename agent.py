@@ -228,16 +228,23 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
                 "tool_call_id": call["id"],
                 "content": str(result),
             })
-            if (str(result).startswith("error:")
-                    and call["id"] not in retried):
-                # one guided retry: nudge the model to fix the call
+
+        # retry nudges go after every result, never between them:
+        # some gateways require each tool call to sit right next
+        # to its result with nothing in between
+        failed = [(c, r) for c, r in zip(calls, results)
+                  if str(r).startswith("error:")
+                  and c["id"] not in retried]
+        if failed:
+            for call, _ in failed:
                 retried.add(call["id"])
-                messages.append({
-                    "role": "user",
-                    "content": "that tool call failed: %s. fix the "
-                               "arguments and try once more, or move on."
-                               % result,
-                })
+            messages.append({
+                "role": "user",
+                "content": "these tool calls failed: %s. fix the "
+                           "arguments and try once more, or move on."
+                           % "; ".join("%s: %s" % (c["function"]["name"], r)
+                                       for c, r in failed),
+            })
 
         if on_todos and hasattr(tools, "progress_line"):
             line = tools.progress_line()
