@@ -8,6 +8,8 @@ run shell commands, fetch web pages, and search the web.
 web_search takes a query and returns titles, urls, and snippets.
 todo_write and todo_read track a todo list for multi-step work.
 read_image loads a png/jpg/gif/webp as a base64 data uri.
+delegate hands a subtask to a subagent with its own history and returns
+a summary. delegates cannot delegate further.
 All paths are relative to the project root. Use them for everything.
 
 Rules:

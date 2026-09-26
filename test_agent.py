@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 10)
+      and len(seen["bodies"][0]["tools"]) == 11)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -1685,6 +1685,82 @@ else:
 ui.init_color(False)
 check("--no-color parses",
       parse_args(["t", "--no-color"]).no_color is True)
+
+# delegate tool: a subagent loop with its own history
+
+import threading as _threading
+import time as _time
+
+
+def _sub_chat_factory(seen):
+    def make_chat():
+        def chat(messages, tools):
+            seen.append([m.get("role") for m in messages])
+            seen.append(messages[0].get("content", ""))
+            return {"role": "assistant",
+                    "content": "subagent summary: did the thing"}
+        return chat
+    return make_chat
+
+
+_sub_seen = []
+_dtools = ToolSet(root, make_chat=_sub_chat_factory(_sub_seen))
+_dout = _dtools.call("delegate", {"task": "do the thing"})
+check("delegate returns the subagent summary",
+      _dout == "subagent summary: did the thing")
+check("subagent got its own history (system + task)",
+      _sub_seen and _sub_seen[0][:2] == ["system", "user"])
+_sys_seen = []
+_systools = ToolSet(root, make_chat=_sub_chat_factory(_sys_seen))
+_systools.call("delegate", {"task": "t", "system": "custom sys"})
+check("delegate passes the custom system prompt",
+      _sys_seen and _sys_seen[1] == "custom sys")
+_nested = ToolSet(root, make_chat=_sub_chat_factory([]), delegate_depth=1)
+check("delegates cannot spawn delegates",
+      "cannot spawn" in _nested.call("delegate", {"task": "x"}))
+_plain = ToolSet(root)
+check("delegate without make_chat is a clean error",
+      "not wired up" in _plain.call("delegate", {"task": "x"}))
+check("delegate with an empty task is an error",
+      _dtools.call("delegate", {"task": ""}).startswith("error:"))
+
+# delegate concurrency cap: max_delegates=1 serializes two threads
+
+_active = {"n": 0, "max": 0}
+_alock = _threading.Lock()
+
+
+def _slow_chat_factory():
+    def make_chat():
+        def chat(messages, tools):
+            with _alock:
+                _active["n"] += 1
+                _active["max"] = max(_active["max"], _active["n"])
+            _time.sleep(0.15)
+            with _alock:
+                _active["n"] -= 1
+            return {"role": "assistant", "content": "slow done"}
+        return chat
+    return make_chat
+
+
+_cap_tools = ToolSet(root, make_chat=_slow_chat_factory(), max_delegates=1)
+_cap_out = []
+
+
+def _run_delegate():
+    _cap_out.append(_cap_tools.call("delegate", {"task": "slow"}))
+
+
+_t1 = _threading.Thread(target=_run_delegate)
+_t2 = _threading.Thread(target=_run_delegate)
+_t1.start()
+_time.sleep(0.05)
+_t2.start()
+_t1.join(timeout=10)
+_t2.join(timeout=10)
+check("both delegates finished", _cap_out == ["slow done", "slow done"])
+check("max_delegates=1 serialized them", _active["max"] == 1)
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

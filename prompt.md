@@ -11,6 +11,8 @@ todo_write takes a json list of {text, status} todos for multi-step
 work (statuses: pending, in_progress, done). todo_read shows the list.
 read_image loads a png/jpg/gif/webp as a base64 data uri so you can
 look at images.
+delegate hands a subtask to a subagent with its own history and returns
+a summary. delegates cannot delegate further.
 
 Rules:
 - Read before you change. Look at the files involved first.

@@ -7,8 +7,11 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import urllib.parse
 import urllib.request
+
+from agent import run as _agent_run, last_answer as _agent_last
 
 MAX_READ = 100_000  # don't dump giant files into context
 MAX_OUTPUT = 20_000
@@ -83,10 +86,15 @@ class BackupStore:
 
 
 class ToolSet:
-    def __init__(self, root, confirm=None):
+    def __init__(self, root, confirm=None, make_chat=None,
+                 delegate_depth=0, max_delegates=3):
         self.root = os.path.abspath(root)
         # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
+        # make_chat() -> chat_fn for delegate subagents, None disables it
+        self.make_chat = make_chat
+        self.delegate_depth = delegate_depth
+        self._delegate_sem = threading.Semaphore(max(1, max_delegates))
         self.backups = BackupStore()
         self.todos = []  # [{text, status}] the model manages itself
         self.tools = {
@@ -115,6 +123,14 @@ class ToolSet:
                 "description": "run a shell command in the project root, returns output",
                 "parameters": {"command": "the command", "timeout": "seconds, default 30"},
                 "run": self.run_shell,
+            },
+            "delegate": {
+                "description": "hand a subtask to a subagent with its own history. "
+                               "it runs to completion and returns a summary. "
+                               "delegates cannot delegate further.",
+                "parameters": {"task": "what the subagent should do",
+                               "system": "optional extra instructions"},
+                "run": self.delegate,
             },
             "fetch_url": {
                 "description": "fetch a web page, returns the text with html stripped",
@@ -281,6 +297,27 @@ class ToolSet:
             out = out[:MAX_OUTPUT] + "\n...[truncated]"
         out = out.rstrip() or "(no output)"
         return "exit %d\n%s" % (proc.returncode, out)
+
+    def delegate(self, task="", system=""):
+        # farm a subtask out to a fresh agent loop with its own history
+        if not task:
+            return "error: empty task"
+        if self.delegate_depth >= 1:
+            return "error: delegates cannot spawn their own delegates"
+        if not self.make_chat:
+            return "error: delegation is not wired up in this run"
+        with self._delegate_sem:
+            sub = ToolSet(self.root, make_chat=self.make_chat,
+                          delegate_depth=self.delegate_depth + 1)
+            try:
+                messages = _agent_run(task, self.make_chat(), sub,
+                                      system_prompt=(system or "").strip()
+                                      or None,
+                                      max_steps=15)
+            except Exception as e:
+                return "error: delegate failed: %s" % e
+            answer = _agent_last(messages)
+            return answer or "(the delegate said nothing)"
 
     def todo_write(self, todos="[]"):
         # the model rewrites its whole todo list each time it changes
