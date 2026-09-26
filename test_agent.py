@@ -284,6 +284,17 @@ check("text reply content passes through",
       _clean_reply({"role": "assistant",
                     "content": "hi"})["content"] == "hi")
 
+# thinking models (deepseek r1 style) 400 unless reasoning_content
+# is echoed back verbatim, so it must survive the whole round trip
+
+check("cleaned reply keeps reasoning_content",
+      _clean_reply({"role": "assistant", "content": "hi",
+                    "reasoning_content": "thinking hard"}
+                   )["reasoning_content"] == "thinking hard")
+check("cleaned reply without it stays without it",
+      "reasoning_content" not in _clean_reply({"role": "assistant",
+                                               "content": "hi"}))
+
 # edit_file: patch one exact string
 
 root4 = tempfile.mkdtemp()
@@ -2170,6 +2181,47 @@ check("--output says where it went",
 # --temperature, --max-tokens, --seed reach the request body
 
 from client import ChatClient as _RealChatClient
+
+# thinking models (deepseek r1 style) 400 unless reasoning_content
+# is echoed back verbatim, so the client must keep it
+
+import io as _rio
+
+
+class _ReasonClient(_RealChatClient):
+    def _post(self, req):
+        payload = {"choices": [{"message": {
+            "role": "assistant",
+            "content": "done",
+            "reasoning_content": "let me think",
+        }}], "usage": {}}
+        return _rio.StringIO(json.dumps(payload))
+
+
+_reason_out = _ReasonClient("http://x/v1", "k", "m").chat(
+    [{"role": "user", "content": "hi"}])
+check("chat() keeps reasoning_content",
+      _reason_out.get("reasoning_content") == "let me think")
+
+
+class _ReasonStreamClient(_RealChatClient):
+    def _post(self, req):
+        chunks = [
+            'data: {"choices": [{"delta": '
+            '{"reasoning_content": "let "}}]}',
+            'data: {"choices": [{"delta": '
+            '{"reasoning_content": "me think"}}]}',
+            'data: {"choices": [{"delta": {"content": "done"}}]}',
+            'data: [DONE]',
+        ]
+        return _rio.BytesIO("\n".join(chunks).encode())
+
+
+_reason_stream = _ReasonStreamClient(
+    "http://x/v1", "k", "m").chat_stream(
+    [{"role": "user", "content": "hi"}])
+check("chat_stream() reassembles reasoning_content",
+      _reason_stream.get("reasoning_content") == "let me think")
 
 _pc = _RealChatClient("http://x/v1", "k", "m", temperature=0.3,
                       max_tokens=50, seed=7)

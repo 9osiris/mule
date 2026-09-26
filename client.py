@@ -111,6 +111,10 @@ class ChatClient:
             }
         if msg.get("content"):
             out["content"] = msg["content"]
+        # thinking models return reasoning_content and require it
+        # passed back verbatim on the next turn
+        if msg.get("reasoning_content"):
+            out["reasoning_content"] = msg["reasoning_content"]
         if msg.get("tool_calls"):
             out["tool_calls"] = [
                 {
@@ -144,6 +148,7 @@ class ChatClient:
         resp = self._post(req)
 
         content_parts = []
+        reasoning_parts = []
         tool_calls = {}
         usage = None
         try:
@@ -170,6 +175,10 @@ class ChatClient:
                     content_parts.append(text)
                     if on_token:
                         on_token(text)
+                # thinking-mode deltas carry reasoning separately
+                reasoning = delta.get("reasoning_content")
+                if reasoning:
+                    reasoning_parts.append(reasoning)
                 # tool calls arrive in pieces, one index at a time
                 for tc in delta.get("tool_calls") or []:
                     idx = tc.get("index", 0)
@@ -194,6 +203,9 @@ class ChatClient:
         content = "".join(content_parts)
         if content:
             out["content"] = content
+        reasoning = "".join(reasoning_parts)
+        if reasoning:
+            out["reasoning_content"] = reasoning
         if tool_calls:
             out["tool_calls"] = [
                 {

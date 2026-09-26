@@ -3021,6 +3021,9 @@ def _clean_reply(reply):
     msg = {"role": "assistant", "content": reply.get("content") or ""}
     if reply.get("tool_calls"):
         msg["tool_calls"] = reply["tool_calls"]
+    # thinking models need reasoning_content echoed back verbatim
+    if reply.get("reasoning_content"):
+        msg["reasoning_content"] = reply["reasoning_content"]
     return msg
 
 
