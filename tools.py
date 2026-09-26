@@ -57,6 +57,71 @@ def make_diff(old, new, path="file"):
     return "\n".join(lines)
 
 
+class JobStore:
+    # background shell jobs, each runs in its own thread
+    def __init__(self, root):
+        self.root = root
+        self.lock = threading.Lock()
+        self.jobs = {}
+        self.next_id = 1
+
+    def start(self, command, timeout=300):
+        with self.lock:
+            jid = self.next_id
+            self.next_id += 1
+            job = {"id": jid, "command": command, "done": False,
+                   "killed": False, "output": "", "returncode": None}
+            self.jobs[jid] = job
+        t = threading.Thread(target=self._run, args=(job, timeout),
+                             daemon=True)
+        t.start()
+        return jid
+
+    def _run(self, job, timeout):
+        try:
+            proc = subprocess.Popen(
+                job["command"], shell=True, cwd=self.root,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True)
+        except Exception as e:
+            job["output"] = "error: could not start: %s" % e
+            job["done"] = True
+            return
+        job["proc"] = proc
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+            job["returncode"] = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+            job["returncode"] = proc.returncode
+            out = (out or "") + "\n[job timed out after %ss]" % timeout
+        job["output"] = out or ""
+        job["done"] = True
+
+    def get(self, jid):
+        with self.lock:
+            return self.jobs.get(jid)
+
+    def all(self):
+        with self.lock:
+            return [self.jobs[k] for k in sorted(self.jobs)]
+
+    def kill(self, jid):
+        job = self.get(jid)
+        if job is None:
+            return None
+        proc = job.get("proc")
+        if proc and not job["done"]:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            job["killed"] = True
+            return True
+        return False
+
+
 class BackupStore:
     # copies of files before they get modified, newest last
     def __init__(self, backup_dir=None):
@@ -96,6 +161,7 @@ class ToolSet:
         self.delegate_depth = delegate_depth
         self._delegate_sem = threading.Semaphore(max(1, max_delegates))
         self.backups = BackupStore()
+        self.jobs = JobStore(self.root)
         self.todos = []  # [{text, status}] the model manages itself
         self.tools = {
             "read_file": {
@@ -120,9 +186,26 @@ class ToolSet:
                 "run": self.list_dir,
             },
             "run_shell": {
-                "description": "run a shell command in the project root, returns output",
-                "parameters": {"command": "the command", "timeout": "seconds, default 30"},
+                "description": "run a shell command in the project root, returns output. "
+                               "pass background=true to get a job id back instead",
+                "parameters": {"command": "the command", "timeout": "seconds, default 30",
+                               "background": "true to run in the background"},
                 "run": self.run_shell,
+            },
+            "jobs": {
+                "description": "list background shell jobs with status and output preview",
+                "parameters": {},
+                "run": self.jobs_list,
+            },
+            "job_output": {
+                "description": "full output of a background job",
+                "parameters": {"id": "the job id"},
+                "run": self.job_output,
+            },
+            "job_kill": {
+                "description": "stop a running background job",
+                "parameters": {"id": "the job id"},
+                "run": self.job_kill,
             },
             "delegate": {
                 "description": "hand a subtask to a subagent with its own history. "
@@ -277,9 +360,12 @@ class ToolSet:
                 lines.append("%s (%d bytes)" % (name, os.path.getsize(p)))
         return "\n".join(lines) or "(empty)"
 
-    def run_shell(self, command, timeout="30"):
+    def run_shell(self, command, timeout="30", background="false"):
         if self.confirm and not self.confirm(command):
             return "declined: the command was not run"
+        if str(background).lower() in ("true", "1", "yes"):
+            jid = self.jobs.start(command)
+            return "job started: %d (use job_output %d to read it)" % (jid, jid)
         try:
             timeout = float(timeout)
         except (TypeError, ValueError):
@@ -297,6 +383,53 @@ class ToolSet:
             out = out[:MAX_OUTPUT] + "\n...[truncated]"
         out = out.rstrip() or "(no output)"
         return "exit %d\n%s" % (proc.returncode, out)
+
+    def jobs_list(self):
+        # every background job, newest last, with an output preview
+        rows = self.jobs.all()
+        if not rows:
+            return "(no background jobs)"
+        lines = []
+        for j in rows:
+            status = "done (exit %s)" % j["returncode"] if j["done"] \
+                else "running"
+            if j["killed"]:
+                status += ", killed"
+            preview = (j["output"] or "").strip().split("\n")
+            preview = " | ".join(preview[:3])[:200]
+            lines.append("#%d [%s] %s%s" % (
+                j["id"], status, j["command"][:60],
+                (" -- " + preview) if preview else ""))
+        return "\n".join(lines)
+
+    def job_output(self, id=""):
+        # full output of one job, capped like everything else
+        try:
+            jid = int(id)
+        except (TypeError, ValueError):
+            return "error: bad job id: %s" % id
+        job = self.jobs.get(jid)
+        if job is None:
+            return "error: no such job: %s" % id
+        out = job["output"] or ("(still running)" if not job["done"]
+                                else "(no output)")
+        if len(out) > MAX_OUTPUT:
+            out = out[:MAX_OUTPUT] + "\n...[truncated]"
+        state = "done" if job["done"] else "running"
+        return "job #%d [%s]\n%s" % (jid, state, out)
+
+    def job_kill(self, id=""):
+        try:
+            jid = int(id)
+        except (TypeError, ValueError):
+            return "error: bad job id: %s" % id
+        job = self.jobs.get(jid)
+        if job is None:
+            return "error: no such job: %s" % id
+        if job["done"]:
+            return "job #%d already finished" % jid
+        self.jobs.kill(jid)
+        return "killed job #%d" % jid
 
     def delegate(self, task="", system=""):
         # farm a subtask out to a fresh agent loop with its own history

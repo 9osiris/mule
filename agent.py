@@ -10,6 +10,8 @@ todo_write and todo_read track a todo list for multi-step work.
 read_image loads a png/jpg/gif/webp as a base64 data uri.
 delegate hands a subtask to a subagent with its own history and returns
 a summary. delegates cannot delegate further.
+run_shell with background=true starts a background job; jobs lists them,
+job_output reads one, job_kill stops one.
 All paths are relative to the project root. Use them for everything.
 
 Rules:

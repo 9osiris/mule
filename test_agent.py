@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 11)
+      and len(seen["bodies"][0]["tools"]) == 14)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -1761,6 +1761,41 @@ _t1.join(timeout=10)
 _t2.join(timeout=10)
 check("both delegates finished", _cap_out == ["slow done", "slow done"])
 check("max_delegates=1 serialized them", _active["max"] == 1)
+
+# background shell jobs: start, poll, output, kill
+
+_btools = ToolSet(root)
+_jid_out = _btools.call("run_shell", {"command": "echo hello-bg",
+                                      "background": "true"})
+check("background run_shell returns a job id",
+      _jid_out.startswith("job started: 1"))
+_deadline = _time.time() + 5
+while _time.time() < _deadline:
+    if "done" in _btools.call("jobs", {}):
+        break
+    _time.sleep(0.05)
+check("jobs lists the finished job",
+      "#1 [done" in _btools.call("jobs", {}))
+check("job_output has the command output",
+      "hello-bg" in _btools.call("job_output", {"id": "1"}))
+check("job_output on a missing job is an error",
+      _btools.call("job_output", {"id": "99"}).startswith("error:"))
+_sleep_out = _btools.call("run_shell", {"command": "sleep 30",
+                                        "background": "true"})
+check("second background job gets id 2", "job started: 2" in _sleep_out)
+_time.sleep(0.3)  # let it actually start
+check("job_kill stops a running job",
+      _btools.call("job_kill", {"id": "2"}) == "killed job #2")
+_deadline = _time.time() + 5
+while _time.time() < _deadline:
+    if "killed" in _btools.call("jobs", {}):
+        break
+    _time.sleep(0.05)
+check("killed job shows as killed", "killed" in _btools.call("jobs", {}))
+check("killing a finished job says so",
+      "already finished" in _btools.call("job_kill", {"id": "1"}))
+check("foreground run_shell still works",
+      "exit 0" in _btools.call("run_shell", {"command": "echo fg"}))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

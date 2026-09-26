@@ -13,6 +13,8 @@ read_image loads a png/jpg/gif/webp as a base64 data uri so you can
 look at images.
 delegate hands a subtask to a subagent with its own history and returns
 a summary. delegates cannot delegate further.
+run_shell with background=true starts a background job and returns a job
+id. jobs lists them, job_output reads one, job_kill stops one.
 
 Rules:
 - Read before you change. Look at the files involved first.
