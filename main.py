@@ -6,7 +6,7 @@ import sys
 from agent import run, last_answer, load_system_prompt, plan_and_approve, \
     _clean_reply
 from client import ChatClient
-from config import load_config, load_profile
+from config import load_config, load_profile, config_problems
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name, \
@@ -163,6 +163,8 @@ def build_parser(cfg):
 
 def parse_args(argv=None):
     cfg = load_config()
+    for problem in config_problems():
+        print("config warning: %s" % problem, file=sys.stderr)
     # --profile has to win before the real parse, so flags can beat it
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--profile", default=None)

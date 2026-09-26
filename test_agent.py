@@ -254,6 +254,7 @@ check("tool result fed back after streamed call",
 # --no-stream flag parsing
 
 from main import parse_args, ask_cmd, build_parser, run_subcommand
+from config import validate_config, config_problems
 check("--no-stream defaults off",
       parse_args(["do things"]).no_stream is False)
 check("--no-stream flag turns on",
@@ -2684,6 +2685,39 @@ check("config file sets flag defaults",
       and _cfg_args.max_tools == 7 and _cfg_args.allow_tools == "read_file")
 check("cli flags beat config defaults",
       parse_args(["t", "--max-tools", "3"]).max_tools == 3)
+config.LOCAL_CONFIG = "/nonexistent/mule.json"
+
+# config schema validation
+
+_probs = validate_config({"model": "x", "max_steps": 5}, source="f")
+check("valid config has no problems", _probs == [])
+_probs = validate_config({"modle": "x"}, source="f")
+check("unknown keys are flagged with suggestions",
+      len(_probs) == 1 and "unknown key 'modle'" in _probs[0]
+      and "known keys" in _probs[0])
+_probs = validate_config({"max_steps": "many"}, source="f")
+check("wrong types are flagged",
+      len(_probs) == 1 and "max_steps" in _probs[0]
+      and "an integer" in _probs[0] and "str" in _probs[0])
+_probs = validate_config({"max_steps": True}, source="f")
+check("bools are not integers here", len(_probs) == 1)
+_probs = validate_config({"timeout": 1.5}, source="f")
+check("int-or-float fields accept both", _probs == [])
+
+_bad_path = os.path.join(tempfile.mkdtemp(), "mule.json")
+with open(_bad_path, "w") as _bf:
+    json.dump({"ask": "yes please", "bogus": 1}, _bf)
+config.HOME_CONFIG = "/nonexistent/mule.json"
+config.LOCAL_CONFIG = _bad_path
+_probs = config_problems()
+check("config_problems names the file",
+      len(_probs) == 2 and all(_bad_path in p for p in _probs))
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    parse_args(["t"])
+check("parse_args warns about bad config",
+      "config warning" in _err.getvalue()
+      and "should be true or false" in _err.getvalue())
 config.LOCAL_CONFIG = "/nonexistent/mule.json"
 
 print()

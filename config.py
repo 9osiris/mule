@@ -22,6 +22,69 @@ def _read(path):
     return {k: data[k] for k in KEYS if k in data}
 
 
+def _read_raw(path):
+    # the unfiltered file, for validation
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+SCHEMA = {
+    "model": str, "base_url": str, "api_key": str, "root": str,
+    "max_steps": int, "timeout": (int, float), "retries": int,
+    "context_budget": int, "ask": bool, "reflect": bool,
+    "verbose": bool, "parallel_tools": bool, "readonly": bool,
+    "no_network": bool, "allow_tools": str, "deny_tools": str,
+    "fallback_model": str, "max_tools": int,
+    "time_limit": (int, float), "temperature": (int, float),
+}
+
+
+def _want_name(want):
+    if want is str:
+        return "a string"
+    if want is int:
+        return "an integer"
+    if want is bool:
+        return "true or false"
+    return "a number"
+
+
+def validate_config(data, source="config"):
+    # human-readable problems: unknown keys, wrong value types
+    problems = []
+    for key in sorted(data):
+        want = SCHEMA.get(key)
+        if want is None:
+            problems.append(
+                "unknown key %r in %s (known keys: %s)"
+                % (key, source, ", ".join(sorted(SCHEMA))))
+            continue
+        value = data[key]
+        ok = isinstance(value, want)
+        if want is int and isinstance(value, bool):
+            ok = False  # True is an int in python, not here
+        if not ok:
+            problems.append(
+                "key %r in %s should be %s, got %s"
+                % (key, source, _want_name(want),
+                   type(value).__name__))
+    return problems
+
+
+def config_problems():
+    # validate both config files, naming the file in each problem
+    problems = []
+    for path in (HOME_CONFIG, LOCAL_CONFIG):
+        raw = _read_raw(path)
+        if raw:
+            problems.extend(validate_config(raw, source=path))
+    return problems
+
+
 def _write(path, data):
     # write the known keys back, sorted, for a stable file
     folder = os.path.dirname(path)
