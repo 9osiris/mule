@@ -11,7 +11,13 @@ HELP_TEXT = """slash commands:
   /save NAME   save the session to ~/.mule/sessions/
   /cost        show tokens and spend so far
   /tools       list available tools
-  /undo        restore the most recently changed file"""
+  /tools off NAME   disable a tool for this session
+  /tools on NAME    re-enable a tool
+  /model [NAME]    show or switch the model
+  /retry       run the last task again
+  /compress    summarize history into a short recap
+  /undo        restore the most recently changed file
+tip: wrap input in ``` blocks for multiline tasks"""
 
 
 def load_commands(commands_dir):
@@ -67,10 +73,40 @@ def handle_slash(line, ctx):
             fmt_cost(cost_for(ctx["model"], t["in"], t["out"]))))
     elif cmd == "undo":
         write(ctx["tools"].undo_last())
+    elif cmd == "model":
+        if arg and ctx.get("set_model"):
+            ctx["set_model"](arg)
+            write("model: %s" % arg)
+        elif arg:
+            write("model switching is not available here")
+        else:
+            write("model: %s" % ctx.get("model", "?"))
+    elif cmd == "retry":
+        last = ctx.get("last_task")
+        if last:
+            return ("run", last)
+        write("nothing to retry yet")
+    elif cmd == "compress":
+        return "compress"
     elif cmd == "tools":
-        names = sorted(ctx["tools"].tools)
-        write("\n".join("  %s - %s" % (n, ctx["tools"].tools[n]["description"])
-                        for n in names))
+        if arg:
+            # /tools off NAME | /tools on NAME
+            bits = arg.split(None, 1)
+            action = bits[0].lower() if bits else ""
+            name = bits[1] if len(bits) > 1 else ""
+            if action == "off" and name:
+                ctx["tools"].disable_tool(name)
+                write("disabled: %s" % name)
+            elif action == "on" and name:
+                ctx["tools"].enable_tool(name)
+                write("enabled: %s" % name)
+            else:
+                write("usage: /tools [off NAME | on NAME]")
+        else:
+            names = sorted(n for n in ctx["tools"].tools
+                           if n not in ctx["tools"].disabled)
+            write("\n".join("  %s - %s" % (n, ctx["tools"].tools[n]["description"])
+                            for n in names))
     elif cmd in commands:
         return ("run", commands[cmd])
     else:
@@ -79,7 +115,9 @@ def handle_slash(line, ctx):
 
 
 def repl_loop(read_line, write, on_task, on_slash):
-    # read_line(prompt) raises EOFError/KeyboardInterrupt to leave
+    # read_line(prompt) raises EOFError/KeyboardInterrupt to leave.
+    # a line starting with ``` opens a multiline block: everything
+    # until the closing ``` becomes one task.
     write("interactive mode. /help for commands, /quit to leave.")
     while True:
         try:
@@ -87,6 +125,17 @@ def repl_loop(read_line, write, on_task, on_slash):
         except (EOFError, KeyboardInterrupt):
             write("")
             break
+        if line.strip().startswith("```"):
+            buf = [line]
+            while True:
+                try:
+                    more = read_line("... ")
+                except (EOFError, KeyboardInterrupt):
+                    more = "```"
+                buf.append(more)
+                if more.strip().endswith("```") and len(buf) > 1:
+                    break
+            line = "\n".join(buf)
         line = line.strip()
         if not line:
             continue
@@ -95,3 +144,21 @@ def repl_loop(read_line, write, on_task, on_slash):
                 break
             continue
         on_task(line)
+
+
+def compress_history(chat_fn, messages, track=None):
+    # one model call summarizes the conversation, history becomes
+    # system prompt plus the recap. keeps long sessions usable.
+    reply = chat_fn(messages + [{
+        "role": "user",
+        "content": "summarize this conversation in under 400 words as "
+                   "notes for your future self. keep every key fact, "
+                   "decision, file change, and open task.",
+    }], [])
+    if track:
+        track(0, reply.get("usage"))
+    summary = reply.get("content") or "(empty summary)"
+    system = [m for m in messages if m.get("role") == "system"]
+    return system + [{"role": "user",
+                      "content": "compressed recap of our work so far:\n"
+                                 + summary}]

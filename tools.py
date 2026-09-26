@@ -166,6 +166,7 @@ class ToolSet:
         self.backups = BackupStore()
         self.jobs = JobStore(self.root)
         self.todos = []  # [{text, status}] the model manages itself
+        self.disabled = set()  # tools the model may not call right now
         self.tools = {
             "read_file": {
                 "description": "read a text file, path relative to project root",
@@ -285,11 +286,41 @@ class ToolSet:
                 "parameters": {"edits": "json list of {path, old, new} objects"},
                 "run": self.apply_patch,
             },
+            "file_info": {
+                "description": "size, type, and modified time for a path",
+                "parameters": {"path": "relative path"},
+                "run": self.file_info,
+            },
+            "git_status": {
+                "description": "git status, short format",
+                "parameters": {},
+                "run": self.git_status,
+            },
+            "git_diff": {
+                "description": "git diff of uncommitted changes, "
+                               "optionally for one path",
+                "parameters": {"path": "optional relative path"},
+                "run": self.git_diff,
+            },
+            "git_log": {
+                "description": "recent commits, one line each",
+                "parameters": {"count": "how many, default 10"},
+                "run": self.git_log,
+            },
+            "http_post": {
+                "description": "post json to a url, returns the response. "
+                               "only works in --ask mode",
+                "parameters": {"url": "http or https url",
+                               "body": "json string to post"},
+                "run": self.http_post,
+            },
         }
 
     def schemas(self):
         out = []
         for name, t in self.tools.items():
+            if name in self.disabled:
+                continue
             props = {k: {"type": "string"} for k in t["parameters"]}
             out.append({
                 "type": "function",
@@ -301,10 +332,23 @@ class ToolSet:
             })
         return out
 
+    def disable_tool(self, name):
+        # hide a tool from the model and block direct calls
+        if name in self.tools:
+            self.disabled.add(name)
+            return True
+        return False
+
+    def enable_tool(self, name):
+        self.disabled.discard(name)
+        return name in self.tools
+
     def call(self, name, args):
         tool = self.tools.get(name)
         if not tool:
             return "error: unknown tool '%s'" % name
+        if name in self.disabled:
+            return "error: tool '%s' is disabled" % name
         try:
             return tool["run"](**{k: v for k, v in args.items()
                                   if k in tool["parameters"]})
@@ -761,3 +805,72 @@ class ToolSet:
             with open(full, "w") as f:
                 f.write(data)
         return "applied %d edits" % len(staged)
+
+    def file_info(self, path):
+        # quick stat block: type, size, modified time
+        full = self._resolve(path or ".")
+        if not os.path.exists(full):
+            return "error: no such file or directory: %s" % path
+        st = os.stat(full)
+        kind = "dir" if os.path.isdir(full) else "file"
+        when = datetime.datetime.fromtimestamp(
+            st.st_mtime).strftime("%Y-%m-%d %H:%M")
+        return "path: %s\ntype: %s\nsize: %d bytes\nmodified: %s" % (
+            path, kind, st.st_size, when)
+
+    def _git(self, *args):
+        # run git in the project root, error when it is not a repo
+        try:
+            proc = subprocess.run(
+                ["git"] + list(args), cwd=self.root,
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return "error: git failed: %s" % e
+        if proc.returncode != 0:
+            return "error: git: %s" % (proc.stderr.strip()
+                                       or "not a git repository")
+        return proc.stdout.rstrip() or "(no output)"
+
+    def git_status(self):
+        return self._git("status", "--short")
+
+    def git_diff(self, path=""):
+        args = ["diff", "--"] + ([path] if path else [])
+        return self._git(*args)
+
+    def git_log(self, count="10"):
+        try:
+            n = max(1, min(int(count), 50))
+        except (TypeError, ValueError):
+            n = 10
+        return self._git("log", "--oneline", "-n", str(n))
+
+    def http_post(self, url="", body="{}"):
+        # post json somewhere. sending data out is sensitive, so this
+        # only runs in --ask mode after an explicit confirmation.
+        if not self.confirm:
+            return ("error: http_post needs --ask mode, the user must "
+                    "confirm every request")
+        scheme = urllib.parse.urlparse(url or "").scheme
+        if scheme not in ("http", "https"):
+            return "error: only http and https urls, got: %s" % scheme
+        try:
+            payload = json.loads(body or "{}")
+        except ValueError:
+            return "error: body must be a json string"
+        if not self.confirm("http_post %s with body: %s"
+                            % (url, json.dumps(payload)[:200])):
+            return "declined: the request was not sent"
+        try:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode(),
+                headers={"User-Agent": "mule/1.0",
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read(MAX_OUTPUT + 1)
+        except Exception as e:
+            return "error: post failed: %s" % e
+        text = data.decode("utf-8", errors="replace")
+        if len(data) > MAX_OUTPUT:
+            text = text[:MAX_OUTPUT] + "\n...[truncated]"
+        return "status %d\n%s" % (resp.status, text or "(empty)")
