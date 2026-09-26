@@ -5,6 +5,7 @@ import sys
 
 from agent import run, last_answer, load_system_prompt
 from client import ChatClient
+from sessions import save_session, load_session, list_sessions, auto_name
 from tools import ToolSet
 
 
@@ -22,16 +23,28 @@ def parse_args(argv=None):
     p.add_argument("--quiet", action="store_true", help="only print the final answer")
     p.add_argument("--no-stream", action="store_true",
                    help="wait for the full response instead of streaming")
+    p.add_argument("--save", nargs="?", const="auto", default=None,
+                   help="save the conversation to a session file "
+                        "(auto-names if no name given)")
+    p.add_argument("--resume", default=None, metavar="NAME",
+                   help="resume a saved session, then continue with the task")
+    p.add_argument("--list-sessions", action="store_true",
+                   help="list saved sessions and exit")
     return p.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
 
+    if args.list_sessions:
+        for name in list_sessions():
+            print(name)
+        return 0
+
     task = args.task
     if not task and not sys.stdin.isatty():
         task = sys.stdin.read().strip()
-    if not task:
+    if not task and not args.resume:
         print("give it a task, as an argument or on stdin", file=sys.stderr)
         return 2
     if not args.api_key:
@@ -41,6 +54,14 @@ def main(argv=None):
     tools = ToolSet(args.root)
     client = ChatClient(args.base_url, args.api_key, args.model)
     system = load_system_prompt(args.system_prompt)
+
+    messages = None
+    if args.resume:
+        try:
+            messages = load_session(args.resume)
+        except ValueError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 1
 
     def chat_fn(messages, tools):
         # stream tokens live unless --no-stream was passed
@@ -71,10 +92,17 @@ def main(argv=None):
         messages = run(task, chat_fn, tools,
                        system_prompt=system,
                        max_steps=args.max_steps,
-                       on_step=show)
+                       on_step=show,
+                       messages=messages)
     except RuntimeError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
+
+    if args.save:
+        name = auto_name() if args.save == "auto" else args.save
+        path = save_session(name, messages)
+        if not args.quiet:
+            print("saved session: %s" % path)
 
     if not args.quiet:
         print("---")

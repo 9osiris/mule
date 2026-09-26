@@ -258,6 +258,60 @@ check("--no-stream defaults off",
 check("--no-stream flag turns on",
       parse_args(["--no-stream", "do things"]).no_stream is True)
 
+# sessions: save, load, list, resume
+
+import sessions
+sess_dir = tempfile.mkdtemp()
+sessions.session_dir = lambda: sess_dir
+
+hist = [
+    {"role": "system", "content": "sys"},
+    {"role": "assistant", "content": "did the thing"},
+    {"role": "user", "content": "thanks"},
+]
+spath = sessions.save_session("demo", hist)
+check("session file written", os.path.isfile(spath))
+check("session roundtrips", sessions.load_session("demo") == hist)
+check("session listed", "demo" in sessions.list_sessions())
+check("auto name looks right",
+      sessions.auto_name().startswith("session-"))
+try:
+    sessions.load_session("nope")
+    check("missing session raises", False)
+except ValueError:
+    check("missing session raises", True)
+
+# resume: old history plus a new task goes through the loop
+
+def resume_chat(messages, tools):
+    check("resumed history kept",
+          messages[0] == {"role": "system", "content": "sys"})
+    check("new task appended",
+          messages[-1] == {"role": "user", "content": "do more"})
+    return {"role": "assistant", "content": "done more"}
+
+
+rtools = ToolSet(tempfile.mkdtemp())
+rmsgs = run("do more", resume_chat, rtools, messages=hist, max_steps=5)
+check("resume returns full history",
+      rmsgs[:3] == hist and last_answer(rmsgs) == "done more")
+
+
+def cont_chat(messages, tools):
+    check("no-task resume passes history through", messages == hist)
+    return {"role": "assistant", "content": "still here"}
+
+
+rmsgs2 = run(None, cont_chat, rtools, messages=hist, max_steps=5)
+check("no-task resume works", last_answer(rmsgs2) == "still here")
+
+check("--save flag takes a name",
+      parse_args(["--save", "x", "task"]).save == "x")
+check("--save alone auto-names",
+      parse_args(["task", "--save"]).save == "auto")
+check("--resume flag",
+      parse_args(["--resume", "demo", "task"]).resume == "demo")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

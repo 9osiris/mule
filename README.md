@@ -34,9 +34,21 @@ python main.py "summarize the repo layout" \
 - `--system-prompt` - path to a custom prompt file (default: prompt.md)
 - `--quiet` - only print the final answer
 - `--no-stream` - wait for the full response instead of streaming tokens
+- `--save [NAME]` - save the conversation to `~/.mule/sessions/`
+  (auto-names with a timestamp if no name given)
+- `--resume NAME` - resume a saved session, then continue with the task
+- `--list-sessions` - list saved sessions and exit
 
 responses stream by default: tokens print as they arrive. pass
 `--no-stream` to go back to waiting for the whole reply.
+
+sessions are jsonl, one message per line. resume like this:
+
+```bash
+python main.py "add tests for the parser" --save parser-work
+# later
+python main.py --resume parser-work "now fix the failing test"
+```
 
 ## how it works
 

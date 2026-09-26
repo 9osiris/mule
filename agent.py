@@ -29,12 +29,19 @@ def load_system_prompt(path=None):
     return SYSTEM_PROMPT
 
 
-def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None):
+def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
+        messages=None):
     """the loop. chat(messages) -> assistant message dict, tools is a ToolSet."""
-    messages = [
-        {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
-        {"role": "user", "content": task},
-    ]
+    if messages is None:
+        messages = [
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
+            {"role": "user", "content": task},
+        ]
+    elif task:
+        # resuming: the new task goes on top of the old history
+        messages = list(messages) + [{"role": "user", "content": task}]
+    else:
+        messages = list(messages)
 
     for step in range(max_steps):
         reply = chat(messages, tools.schemas())
