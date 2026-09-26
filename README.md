@@ -122,7 +122,8 @@ streaming support, token usage capture, and retries with
 exponential backoff on 429s and 5xxs. `cost.py` holds rough
 per-model pricing. `sessions.py` saves and resumes conversations
 as jsonl files under `~/.mule/sessions/`. `prompt.md` is the system
-prompt.
+prompt. `repl.py` runs the `--interactive` prompt loop and its
+slash commands.
 
 ## tools
 
@@ -142,7 +143,8 @@ directories you don't mind being changed, and read the task output.
 run_shell has a timeout and refuses interactive commands by design
 (they'd just hang until the timeout), but a model can still do
 dumb stuff like `rm -rf` inside the root. pass `--ask` to approve
-every shell command yourself before it runs. you were warned.
+every shell command and file write yourself before it runs (file
+writes show a diff first). you were warned.
 
 ## tests
 

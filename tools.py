@@ -74,7 +74,7 @@ class BackupStore:
 class ToolSet:
     def __init__(self, root, confirm=None):
         self.root = os.path.abspath(root)
-        # confirm(command) -> bool, asked before every shell command
+        # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
         self.backups = BackupStore()
         self.tools = {
