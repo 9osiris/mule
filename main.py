@@ -119,6 +119,14 @@ def run_subcommand(name, rest):
         return 0
     if name == "config":
         return cmd_config(rest)
+    if name == "doctor":
+        from doctor import run_doctor
+        root = "."
+        if "--root" in rest:
+            i = rest.index("--root")
+            if i + 1 < len(rest):
+                root = rest[i + 1]
+        return run_doctor(root)
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
 

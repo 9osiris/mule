@@ -1441,6 +1441,69 @@ check("cli config unknown key errors",
 config_mod.HOME_CONFIG = _orig_home
 config_mod.LOCAL_CONFIG = _orig_local
 
+# mule doctor
+
+from doctor import run_doctor, _check_reachable, _check_config, _check_key, \
+    _check_root
+
+
+class _OkHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+_doc_srv = HTTPServer(("127.0.0.1", 0), _OkHandler)
+threading.Thread(target=_doc_srv.serve_forever, daemon=True).start()
+_doc_base = "http://127.0.0.1:%d/v1" % _doc_srv.server_port
+
+_doc_home = tempfile.mkdtemp()
+_doc_orig = (config_mod.HOME_CONFIG, config_mod.LOCAL_CONFIG)
+config_mod.HOME_CONFIG = os.path.join(_doc_home, "mule.json")
+config_mod.LOCAL_CONFIG = os.path.join(_doc_home, "local.json")
+_doc_env = dict(os.environ)
+os.environ.pop("OPENAI_API_KEY", None)
+os.environ["MULE_BASE_URL"] = _doc_base
+
+ok, _ = _check_reachable()
+check("doctor reaches a live base url", ok)
+os.environ["MULE_BASE_URL"] = "http://127.0.0.1:1/v1"
+ok, _ = _check_reachable()
+check("doctor fails on a dead base url", not ok)
+os.environ["MULE_BASE_URL"] = _doc_base
+
+ok, label = _check_key()
+check("doctor fails with no api key", not ok)
+os.environ["OPENAI_API_KEY"] = "sk-test"
+ok, label = _check_key()
+check("doctor passes with an api key and never prints it",
+      ok and "sk-test" not in label)
+
+with open(config_mod.LOCAL_CONFIG, "w") as f:
+    f.write("not json{")
+ok, _ = _check_config(config_mod.LOCAL_CONFIG, "local")
+check("doctor flags broken config json", not ok)
+os.remove(config_mod.LOCAL_CONFIG)
+ok, _ = _check_config(config_mod.LOCAL_CONFIG, "local")
+check("doctor is fine with a missing config", ok)
+
+check("doctor ok on an existing root", _check_root(_doc_home)[0])
+check("doctor fails on a missing root",
+      not _check_root("/nonexistent-dir-xyz")[0])
+
+check("doctor returns 0 when healthy", run_doctor(_doc_home) == 0)
+os.environ.pop("OPENAI_API_KEY", None)
+check("doctor returns 1 when the key is missing",
+      run_doctor(_doc_home) == 1)
+
+os.environ.clear()
+os.environ.update(_doc_env)
+config_mod.HOME_CONFIG, config_mod.LOCAL_CONFIG = _doc_orig
+_doc_srv.shutdown()
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
