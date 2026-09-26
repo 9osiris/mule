@@ -1980,6 +1980,47 @@ check("--output writes the final answer",
 check("--output says where it went",
       "wrote answer to" in _buf.getvalue())
 
+# --temperature, --max-tokens, --seed reach the request body
+
+from client import ChatClient as _RealChatClient
+
+_pc = _RealChatClient("http://x/v1", "k", "m", temperature=0.3,
+                      max_tokens=50, seed=7)
+_body = _pc._body([{"role": "user", "content": "hi"}], [{"type": "f"}])
+check("body carries temperature",
+      _body.get("temperature") == 0.3)
+check("body carries max_tokens", _body.get("max_tokens") == 50)
+check("body carries seed", _body.get("seed") == 7)
+_plain_c = _RealChatClient("http://x/v1", "k", "m")
+_plain_body = _plain_c._body([{"role": "user", "content": "hi"}])
+check("unset params stay out of the body",
+      not any(k in _plain_body for k in ("temperature", "max_tokens",
+                                         "seed")))
+_wire = {}
+
+
+class _WireCapture(_RealChatClient):
+    def _post(self, req):
+        _wire.update(json.loads(req.data.decode()))
+        raise RuntimeError("stop here")
+
+
+_wc = _WireCapture("http://x/v1", "k", "m", temperature=0.9, seed=3)
+try:
+    _wc.chat([{"role": "user", "content": "hi"}])
+except RuntimeError:
+    pass
+check("wire body carries temperature and seed",
+      _wire.get("temperature") == 0.9 and _wire.get("seed") == 3)
+_pa = parse_args(["t", "--temperature", "0.5", "--max-tokens", "100",
+                  "--seed", "42"])
+check("flags parse", _pa.temperature == 0.5 and _pa.max_tokens == 100
+      and _pa.seed == 42)
+check("flags default to unset",
+      parse_args(["t"]).temperature is None
+      and parse_args(["t"]).max_tokens is None
+      and parse_args(["t"]).seed is None)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

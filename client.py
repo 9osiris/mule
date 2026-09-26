@@ -10,13 +10,34 @@ class ChatClient:
     """talks to any openai-compatible /v1/chat/completions endpoint."""
 
     def __init__(self, base_url, api_key, model, timeout=120,
-                 retries=3, backoff=1.0):
+                 retries=3, backoff=1.0, temperature=None,
+                 max_tokens=None, seed=None):
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.retries = retries
         self.backoff = backoff
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.seed = seed
+
+    def _body(self, messages, tools=None):
+        # request body, sampling params only included when set
+        body = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if tools:
+            body["tools"] = tools
+            body["tool_choice"] = "auto"
+        if self.temperature is not None:
+            body["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
+        if self.seed is not None:
+            body["seed"] = self.seed
+        return body
 
     def _post(self, req):
         # one post with retries on rate limits and server errors
@@ -32,13 +53,7 @@ class ChatClient:
                 time.sleep(self.backoff * (2 ** attempt))
 
     def chat(self, messages, tools=None):
-        body = {
-            "model": self.model,
-            "messages": messages,
-        }
-        if tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
+        body = self._body(messages, tools)
 
         req = urllib.request.Request(
             self.url,
@@ -81,16 +96,10 @@ class ChatClient:
     def chat_stream(self, messages, tools=None, on_token=None):
         # same as chat() but reads server-sent events, calling
         # on_token(text) for each content chunk as it arrives
-        body = {
-            "model": self.model,
-            "messages": messages,
-            "stream": True,
-            # ask the server to send token counts in the last chunk
-            "stream_options": {"include_usage": True},
-        }
-        if tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
+        body = self._body(messages, tools)
+        body["stream"] = True
+        # ask the server to send token counts in the last chunk
+        body["stream_options"] = {"include_usage": True}
 
         req = urllib.request.Request(
             self.url,

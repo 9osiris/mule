@@ -98,6 +98,12 @@ def build_parser(cfg):
                         "for scripting")
     p.add_argument("--output", metavar="FILE",
                    help="write the final answer to FILE too")
+    p.add_argument("--temperature", type=float, default=None,
+                   help="sampling temperature, lower is more focused")
+    p.add_argument("--max-tokens", type=int, default=None,
+                   help="cap on completion tokens per request")
+    p.add_argument("--seed", type=int, default=None,
+                   help="seed for reproducible outputs")
     return p
 
 
@@ -458,7 +464,9 @@ def main(argv=None):
         return 2
 
     client = ChatClient(args.base_url, args.api_key, args.model,
-                        timeout=args.timeout, retries=args.retries)
+                        timeout=args.timeout, retries=args.retries,
+                        temperature=args.temperature,
+                        max_tokens=args.max_tokens, seed=args.seed)
     tools.make_chat = lambda: make_chat_fn(args, client)
     system = resolve_system(args)
 
