@@ -279,6 +279,12 @@ class ToolSet:
                 "parameters": {"paths": "json list of relative paths"},
                 "run": self.read_many,
             },
+            "apply_patch": {
+                "description": "apply several edit_file-style patches in "
+                               "one call, all or nothing",
+                "parameters": {"edits": "json list of {path, old, new} objects"},
+                "run": self.apply_patch,
+            },
         }
 
     def schemas(self):
@@ -720,3 +726,38 @@ class ToolSet:
                 data = data[:MAX_READ] + "\n...[truncated]"
             parts.append("=== %s ===\n%s" % (p, data))
         return "\n\n".join(parts) or "(no files given)"
+
+    def apply_patch(self, edits="[]"):
+        # batch of {path, old, new} edits. every old string must
+        # match exactly once, otherwise nothing is written.
+        try:
+            wanted = json.loads(edits or "[]")
+        except ValueError:
+            return "error: edits must be a json list"
+        if not isinstance(wanted, list) or not wanted:
+            return "error: edits must be a non-empty json list"
+        staged = []
+        for e in wanted:
+            path = (e or {}).get("path", "")
+            old, new = (e or {}).get("old", ""), (e or {}).get("new", "")
+            full = self._resolve(path)
+            if not os.path.isfile(full):
+                return "error: no such file: %s (nothing applied)" % path
+            if not old:
+                return "error: empty old string for %s (nothing applied)" % path
+            with open(full, "r", errors="replace") as f:
+                data = f.read()
+            if data.count(old) != 1:
+                return ("error: old string matches %d times in %s, "
+                        "need exactly 1 (nothing applied)"
+                        % (data.count(old), path))
+            staged.append((path, full, data.replace(old, new, 1)))
+        if self.confirm and not self.confirm(
+                "apply_patch: %d edits across %d files"
+                % (len(staged), len({p for p, _, _ in staged}))):
+            return "declined: the patch was not applied"
+        for path, full, data in staged:
+            self.backups.stash(full)
+            with open(full, "w") as f:
+                f.write(data)
+        return "applied %d edits" % len(staged)
