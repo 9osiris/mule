@@ -50,6 +50,12 @@ python main.py "add tests for the parser" --save parser-work
 python main.py --resume parser-work "now fix the failing test"
 ```
 
+## cost tracking
+
+each step prints its token counts and rough cost, with a session total
+at the end. pricing lives in `cost.py` (dollars per 1m tokens, update
+as prices move); models not in the table show "unknown pricing".
+
 ## how it works
 
 `agent.py` runs the loop: send messages, take the model's tool calls,
@@ -57,7 +63,10 @@ run them, feed results back, repeat. `tools.py` has five tools -
 read_file, write_file, edit_file, list_dir, run_shell - all sandboxed
 to `--root` so the agent can't wander out of the project dir.
 `client.py` is the http client for /v1/chat/completions, with
-streaming support. `prompt.md` is the system prompt.
+streaming support and token usage capture. `cost.py` holds rough
+per-model pricing. `sessions.py` saves and resumes conversations
+as jsonl files under `~/.mule/sessions/`. `prompt.md` is the system
+prompt.
 
 ## tools
 

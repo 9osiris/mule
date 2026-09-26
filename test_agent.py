@@ -312,6 +312,107 @@ check("--save alone auto-names",
 check("--resume flag",
       parse_args(["--resume", "demo", "task"]).resume == "demo")
 
+# cost math
+
+from cost import cost_for, fmt_cost
+check("cost math on a known model",
+      abs(cost_for("gpt-4o-mini", 1_000_000, 1_000_000) - 0.75) < 1e-12)
+check("unknown model has no cost",
+      cost_for("some-local-model", 100, 100) is None)
+check("cost formats",
+      fmt_cost(0.00042) == "$0.0004"
+      and fmt_cost(None) == "unknown pricing")
+
+# usage from a normal (non-stream) response
+
+URESP = [
+    {"choices": [{"message": {"role": "assistant", "content": "priced"}}],
+     "usage": {"prompt_tokens": 1200, "completion_tokens": 300}},
+]
+
+
+class UHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        body = URESP.pop(0)
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+userver = HTTPServer(("127.0.0.1", 0), UHandler)
+threading.Thread(target=userver.serve_forever, daemon=True).start()
+uclient = ChatClient("http://127.0.0.1:%d/v1" % userver.server_port,
+                     "fake-key", "gpt-4o-mini")
+ureply = uclient.chat([{"role": "user", "content": "hi"}])
+userver.shutdown()
+check("non-stream usage captured",
+      ureply.get("usage") == {"prompt_tokens": 1200,
+                              "completion_tokens": 300})
+check("cost of the reply matches pricing",
+      abs(cost_for("gpt-4o-mini", 1200, 300)
+          - (1200 / 1e6 * 0.15 + 300 / 1e6 * 0.60)) < 1e-15)
+
+# usage_cb fires per step through the loop
+
+def priced_chat(messages, tools):
+    return {"role": "assistant", "content": "x",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+
+got = []
+run("y", priced_chat, ToolSet(tempfile.mkdtemp()), system_prompt="t",
+    max_steps=1, usage_cb=lambda s, u: got.append((s, u)))
+check("usage_cb got one step",
+      got == [(1, {"prompt_tokens": 10, "completion_tokens": 5})])
+
+# streamed usage chunk
+
+def sse2(delta):
+    return "data: %s\n\n" % json.dumps({"choices": [{"delta": delta}]})
+
+
+USSE = ("".join([
+    sse2({"content": "hi"}),
+    "data: %s\n\n" % json.dumps(
+        {"usage": {"prompt_tokens": 40, "completion_tokens": 8}}),
+]) + "data: [DONE]\n\n").encode()
+useen = {}
+
+
+class USSEHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        useen["body"] = json.loads(self.rfile.read(length))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(USSE)))
+        self.end_headers()
+        self.wfile.write(USSE)
+
+    def log_message(self, *a):
+        pass
+
+
+usserver = HTTPServer(("127.0.0.1", 0), USSEHandler)
+threading.Thread(target=usserver.serve_forever, daemon=True).start()
+usclient = ChatClient("http://127.0.0.1:%d/v1" % usserver.server_port,
+                      "fake-key", "gpt-4o-mini")
+usreply = usclient.chat_stream([{"role": "user", "content": "hi"}])
+usserver.shutdown()
+check("stream asked for usage",
+      useen["body"].get("stream_options") == {"include_usage": True})
+check("streamed usage captured",
+      usreply.get("usage") == {"prompt_tokens": 40, "completion_tokens": 8})
+check("streamed content still intact", usreply.get("content") == "hi")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

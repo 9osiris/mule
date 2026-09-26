@@ -5,6 +5,7 @@ import sys
 
 from agent import run, last_answer, load_system_prompt
 from client import ChatClient
+from cost import cost_for, fmt_cost
 from sessions import save_session, load_session, list_sessions, auto_name
 from tools import ToolSet
 
@@ -88,12 +89,26 @@ def main(argv=None):
             summary = " ".join("%s=%s" % (k, str(v)[:60]) for k, v in a.items())
             print("$ %s %s" % (c["function"]["name"], summary))
 
+    totals = {"in": 0, "out": 0}
+
+    def track(step, usage):
+        if not usage or args.quiet:
+            return
+        pin = usage.get("prompt_tokens", 0)
+        pout = usage.get("completion_tokens", 0)
+        totals["in"] += pin
+        totals["out"] += pout
+        print("  [step %d: %s in / %s out, %s]" % (
+            step, "{:,}".format(pin), "{:,}".format(pout),
+            fmt_cost(cost_for(args.model, pin, pout))))
+
     try:
         messages = run(task, chat_fn, tools,
                        system_prompt=system,
                        max_steps=args.max_steps,
                        on_step=show,
-                       messages=messages)
+                       messages=messages,
+                       usage_cb=track)
     except RuntimeError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1
@@ -106,6 +121,9 @@ def main(argv=None):
 
     if not args.quiet:
         print("---")
+        print("tokens: %s in / %s out, cost %s" % (
+            "{:,}".format(totals["in"]), "{:,}".format(totals["out"]),
+            fmt_cost(cost_for(args.model, totals["in"], totals["out"]))))
     print(last_answer(messages))
     return 0
 

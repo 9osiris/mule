@@ -39,6 +39,12 @@ class ChatClient:
 
         msg = payload["choices"][0]["message"]
         out = {"role": "assistant"}
+        usage = payload.get("usage") or {}
+        if usage:
+            out["usage"] = {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            }
         if msg.get("content"):
             out["content"] = msg["content"]
         if msg.get("tool_calls"):
@@ -61,6 +67,8 @@ class ChatClient:
             "model": self.model,
             "messages": messages,
             "stream": True,
+            # ask the server to send token counts in the last chunk
+            "stream_options": {"include_usage": True},
         }
         if tools:
             body["tools"] = tools
@@ -83,6 +91,7 @@ class ChatClient:
 
         content_parts = []
         tool_calls = {}
+        usage = None
         try:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
@@ -95,6 +104,8 @@ class ChatClient:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if "usage" in chunk:
+                    usage = chunk["usage"]
                 choices = chunk.get("choices") or [{}]
                 delta = choices[0].get("delta") or {}
                 text = delta.get("content")
@@ -118,6 +129,11 @@ class ChatClient:
             resp.close()
 
         out = {"role": "assistant"}
+        if usage:
+            out["usage"] = {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+            }
         content = "".join(content_parts)
         if content:
             out["content"] = content

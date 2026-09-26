@@ -30,7 +30,7 @@ def load_system_prompt(path=None):
 
 
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
-        messages=None):
+        messages=None, usage_cb=None):
     """the loop. chat(messages) -> assistant message dict, tools is a ToolSet."""
     if messages is None:
         messages = [
@@ -45,6 +45,8 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
 
     for step in range(max_steps):
         reply = chat(messages, tools.schemas())
+        if usage_cb:
+            usage_cb(step + 1, reply.get("usage"))
         messages.append(_clean_reply(reply))
 
         calls = reply.get("tool_calls") or []
