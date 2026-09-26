@@ -3,7 +3,8 @@ import json
 import os
 import sys
 
-from agent import run, last_answer, load_system_prompt, plan_and_approve
+from agent import run, last_answer, load_system_prompt, plan_and_approve, \
+    _clean_reply
 from client import ChatClient
 from config import load_config, load_profile
 from cost import cost_for, fmt_cost
@@ -107,6 +108,27 @@ def build_parser(cfg):
                    help="seed for reproducible outputs")
     p.add_argument("--continue", dest="cont", action="store_true",
                    help="pick up the most recent session")
+    p.add_argument("--fork", default=None, metavar="NAME",
+                   help="branch off a saved session as a new run")
+    p.add_argument("--reflect", action="store_true",
+                   help="critique the final answer and improve it "
+                        "before returning")
+    p.add_argument("--fallback-model", default=None, metavar="MODEL",
+                   help="switch to this model if the primary keeps failing")
+    p.add_argument("--stop", default=None, metavar="SEQS",
+                   help="comma-separated stop sequences for the model")
+    p.add_argument("--schema", default=None, metavar="FILE",
+                   help="validate the final answer as json against this "
+                        "schema file ({\"required\": [...]})")
+    p.add_argument("--max-tools", type=int, default=None,
+                   help="stop after this many tool executions")
+    p.add_argument("--time-limit", type=float, default=None,
+                   metavar="SECONDS",
+                   help="stop the run after this many seconds")
+    p.add_argument("--parallel-tools", action="store_true",
+                   help="run independent tool calls in one turn concurrently")
+    p.add_argument("--verbose", action="store_true",
+                   help="print per-step timing and extra detail")
     return p
 
 
@@ -244,11 +266,30 @@ def ask_plan(plan):
 
 
 def make_chat_fn(args, client):
+    # wraps the client with --fallback-model: if the primary model
+    # raises, switch once and retry. model_box tracks which model
+    # actually answered, so cost math stays honest.
+    model_box = {"model": args.model, "fell_back": False}
+
+    def _once(fn, messages, tools, **kw):
+        try:
+            return fn(messages, tools, **kw)
+        except RuntimeError:
+            if args.fallback_model and not model_box["fell_back"]:
+                model_box["fell_back"] = True
+                model_box["model"] = args.fallback_model
+                client.model = args.fallback_model
+                say(args, "primary model failed, falling back to %s"
+                          % args.fallback_model)
+                return fn(messages, tools, **kw)
+            raise
+
     def chat_fn(messages, tools):
+        stop = args.stop.split(",") if args.stop else None
         # stream tokens live unless --no-stream was passed.
         # --print stays silent, it only wants the final answer.
         if args.no_stream or getattr(args, "print_mode", False):
-            return client.chat(messages, tools)
+            return _once(client.chat, messages, tools, stop=stop)
         printed = []
 
         def on_token(t):
@@ -257,10 +298,13 @@ def make_chat_fn(args, client):
             print(t, end="", flush=True)
             printed.append(t)
 
-        reply = client.chat_stream(messages, tools, on_token=on_token)
+        reply = _once(client.chat_stream, messages, tools,
+                      on_token=on_token, stop=stop)
         if printed and not args.quiet and not args.json:
             print()
         return reply
+
+    chat_fn.model_box = model_box
     return chat_fn
 
 
@@ -272,16 +316,17 @@ def say(args, msg):
         print(msg)
 
 
-def build_result(args, messages, totals):
+def build_result(args, messages, totals, model_box=None):
     # the machine-readable result for --json
+    model = model_box["model"] if model_box else args.model
     return {
         "answer": last_answer(messages),
         "steps": sum(1 for m in messages
                      if m.get("role") == "assistant" and m.get("tool_calls")),
-        "model": args.model,
+        "model": model,
         "tokens_in": totals["in"],
         "tokens_out": totals["out"],
-        "cost": cost_for(args.model, totals["in"], totals["out"]),
+        "cost": cost_for(model, totals["in"], totals["out"]),
     }
 
 
@@ -303,9 +348,10 @@ def make_todos(args):
     return show_todos
 
 
-def make_track(args, totals):
+def make_track(args, totals, model_box=None):
     def track(step, usage):
         # returns True when the cost budget is blown, stopping the loop
+        model = model_box["model"] if model_box else args.model
         if usage:
             pin = usage.get("prompt_tokens", 0)
             pout = usage.get("completion_tokens", 0)
@@ -314,13 +360,86 @@ def make_track(args, totals):
             if not args.quiet and not args.json and not args.print_mode:
                 print("  [step %d: %s in / %s out, %s]" % (
                     step, "{:,}".format(pin), "{:,}".format(pout),
-                    fmt_cost(cost_for(args.model, pin, pout))))
+                    fmt_cost(cost_for(model, pin, pout))))
         if args.max_cost is not None:
-            spent = cost_for(args.model, totals["in"], totals["out"])
+            spent = cost_for(model, totals["in"], totals["out"])
             if spent is not None and spent > args.max_cost:
                 return True
         return False
     return track
+
+
+def make_timing(args):
+    # per-step durations for --verbose
+    def on_timing(step, seconds):
+        if args.verbose and not args.quiet and not args.json:
+            print("  [step %d took %.1fs]" % (step, seconds))
+    return on_timing
+
+
+def validate_schema(answer, schema):
+    # tiny validator: answer must be json with the required keys.
+    # returns None when valid, else a human-readable error.
+    try:
+        data = json.loads(answer)
+    except ValueError:
+        return "the answer is not valid json"
+    required = schema.get("required") or []
+    if not isinstance(data, dict):
+        return "the answer must be a json object"
+    missing = [k for k in required if k not in data]
+    if missing:
+        return "missing required keys: %s" % ", ".join(missing)
+    return None
+
+
+def enforce_schema(args, chat_fn, messages, track, step):
+    # --schema: check the final answer, give the model one
+    # chance to fix it when it does not validate
+    try:
+        with open(args.schema) as f:
+            schema = json.load(f)
+    except (OSError, ValueError) as e:
+        print(red("error: bad schema file: %s" % e), file=sys.stderr)
+        return messages
+    if not isinstance(schema, dict):
+        print(red("error: schema file must be a json object"),
+              file=sys.stderr)
+        return messages
+    err = validate_schema(last_answer(messages), schema)
+    if err is None:
+        return messages
+    if not args.quiet:
+        say(args, "schema check failed (%s), asking for a fix" % err)
+    messages.append({
+        "role": "user",
+        "content": "your last answer failed validation: %s. the schema "
+                   "is %s. reply with only the corrected json."
+                   % (err, json.dumps(schema)),
+    })
+    reply = chat_fn(messages, [])
+    track(step, reply.get("usage"))
+    messages.append(_clean_reply(reply))
+    err = validate_schema(last_answer(messages), schema)
+    if err is not None and not args.quiet:
+        say(args, "warning: answer still does not validate: %s" % err)
+    return messages
+
+
+def reflect_answer(args, chat_fn, messages, track, step):
+    # --reflect: one extra model call to critique the final
+    # answer, then the improved version becomes the answer
+    if not args.quiet:
+        say(args, "reflecting on the answer...")
+    messages.append({
+        "role": "user",
+        "content": "review your final answer above. reply with a short "
+                   "critique, then an improved version of the answer.",
+    })
+    reply = chat_fn(messages, [])
+    track(step, reply.get("usage"))
+    messages.append(_clean_reply(reply))
+    return messages
 
 
 def run_interactive(args, tools, system, messages, task,
@@ -480,6 +599,16 @@ def main(argv=None):
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
             return 1
+    if args.fork and messages is None:
+        # branch off a saved session: same start, but saving later
+        # needs an explicit name, so the original stays untouched
+        try:
+            messages = load_session(args.fork)
+        except ValueError as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return 1
+        if not args.quiet and not args.print_mode:
+            say(args, "forked from session: %s" % args.fork)
     if args.cont and messages is None:
         latest = latest_session()
         if latest is None:
@@ -497,10 +626,12 @@ def main(argv=None):
         messages = [{"role": "system", "content": system}]
 
     chat_fn = make_chat_fn(args, client)
+    model_box = chat_fn.model_box
     show = make_show(args)
     totals = {"in": 0, "out": 0}
-    track = make_track(args, totals)
+    track = make_track(args, totals, model_box)
     todos = make_todos(args)
+    timing = make_timing(args)
 
     if args.interactive:
         return run_interactive(args, tools, system, messages, task,
@@ -526,10 +657,23 @@ def main(argv=None):
                        usage_cb=track,
                        on_todos=todos,
                        context_budget=args.context_budget,
-                       dry_run=args.dry_run)
+                       dry_run=args.dry_run,
+                       max_tools=args.max_tools,
+                       time_limit=args.time_limit,
+                       on_timing=timing,
+                       parallel_tools=args.parallel_tools)
     except RuntimeError as e:
         print(red("error: %s" % e), file=sys.stderr)
         return 1
+
+    step_no = sum(1 for m in messages
+                  if m.get("role") == "assistant") + 1
+    final = last_answer(messages)
+    if args.reflect and final and not final.startswith("stopped:"):
+        messages = reflect_answer(args, chat_fn, messages, track, step_no)
+        step_no += 1
+    if args.schema and final and not final.startswith("stopped:"):
+        messages = enforce_schema(args, chat_fn, messages, track, step_no)
 
     if args.save:
         name = auto_name() if args.save == "auto" else args.save
@@ -537,9 +681,10 @@ def main(argv=None):
         if not args.quiet:
             say(args, "saved session: %s" % path)
 
+    used_model = model_box["model"]
     cost_line = "tokens: %s in / %s out, cost %s" % (
         "{:,}".format(totals["in"]), "{:,}".format(totals["out"]),
-        fmt_cost(cost_for(args.model, totals["in"], totals["out"])))
+        fmt_cost(cost_for(used_model, totals["in"], totals["out"])))
     if args.export:
         from sessions import export_session
         export_session(args.export, messages, cost_line=cost_line)
@@ -547,7 +692,8 @@ def main(argv=None):
             say(args, "exported: %s" % args.export)
 
     if args.json:
-        print(json.dumps(build_result(args, messages, totals), indent=2))
+        print(json.dumps(build_result(args, messages, totals, model_box),
+                         indent=2))
         return 0
 
     if args.output:
