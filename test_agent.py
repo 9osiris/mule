@@ -1553,6 +1553,35 @@ check("models shows in/out pricing",
 check("models has a header row",
       "in $/1M" in _models_out and "out $/1M" in _models_out)
 
+# --json output mode
+
+from main import build_result
+
+_json_args = parse_args(["do the thing", "--json", "--model", "gpt-4o-mini"])
+_json_messages = [
+    {"role": "user", "content": "do the thing"},
+    {"role": "assistant", "tool_calls": [
+        {"id": "c1",
+         "function": {"name": "list_dir", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "c1", "content": "a.txt"},
+    {"role": "assistant", "content": "all done"},
+]
+_json_totals = {"in": 1000, "out": 500}
+_json_result = build_result(_json_args, _json_messages, _json_totals)
+check("--json result has the answer",
+      _json_result["answer"] == "all done")
+check("--json result counts tool steps",
+      _json_result["steps"] == 1)
+check("--json result carries usage and model",
+      _json_result["tokens_in"] == 1000
+      and _json_result["tokens_out"] == 500
+      and _json_result["model"] == "gpt-4o-mini")
+check("--json result has a numeric cost",
+      isinstance(_json_result["cost"], float))
+check("--json output serializes cleanly",
+      json.loads(json.dumps(_json_result))["answer"] == "all done")
+check("--json parses", parse_args(["t", "--json"]).json is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

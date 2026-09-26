@@ -213,21 +213,42 @@ def make_chat_fn(args, client):
         printed = []
 
         def on_token(t):
-            if args.quiet:
+            if args.quiet or args.json:
                 return
             print(t, end="", flush=True)
             printed.append(t)
 
         reply = client.chat_stream(messages, tools, on_token=on_token)
-        if printed and not args.quiet:
+        if printed and not args.quiet and not args.json:
             print()
         return reply
     return chat_fn
 
 
+def say(args, msg):
+    # info lines go to stderr in --json mode, keeping stdout pure json
+    if args.json:
+        print(msg, file=sys.stderr)
+    else:
+        print(msg)
+
+
+def build_result(args, messages, totals):
+    # the machine-readable result for --json
+    return {
+        "answer": last_answer(messages),
+        "steps": sum(1 for m in messages
+                     if m.get("role") == "assistant" and m.get("tool_calls")),
+        "model": args.model,
+        "tokens_in": totals["in"],
+        "tokens_out": totals["out"],
+        "cost": cost_for(args.model, totals["in"], totals["out"]),
+    }
+
+
 def make_show(args):
     def show(step, calls):
-        if args.quiet:
+        if args.quiet or args.json:
             return
         for c in calls:
             a = json.loads(c["function"].get("arguments") or "{}")
@@ -238,7 +259,7 @@ def make_show(args):
 
 def make_todos(args):
     def show_todos(line):
-        if not args.quiet:
+        if not args.quiet and not args.json:
             print(line)
     return show_todos
 
@@ -251,7 +272,7 @@ def make_track(args, totals):
             pout = usage.get("completion_tokens", 0)
             totals["in"] += pin
             totals["out"] += pout
-            if not args.quiet:
+            if not args.quiet and not args.json:
                 print("  [step %d: %s in / %s out, %s]" % (
                     step, "{:,}".format(pin), "{:,}".format(pout),
                     fmt_cost(cost_for(args.model, pin, pout))))
@@ -349,7 +370,7 @@ def main(argv=None):
         from checkpoints import save_checkpoint
         path = save_checkpoint(args.root, args.checkpoint)
         if not args.quiet:
-            print("checkpoint saved: %s" % path)
+            say(args, "checkpoint saved: %s" % path)
 
     task = args.task
     if not task and not args.interactive and not sys.stdin.isatty():
@@ -411,7 +432,7 @@ def main(argv=None):
         name = auto_name() if args.save == "auto" else args.save
         path = save_session(name, messages)
         if not args.quiet:
-            print("saved session: %s" % path)
+            say(args, "saved session: %s" % path)
 
     cost_line = "tokens: %s in / %s out, cost %s" % (
         "{:,}".format(totals["in"]), "{:,}".format(totals["out"]),
@@ -420,7 +441,11 @@ def main(argv=None):
         from sessions import export_session
         export_session(args.export, messages, cost_line=cost_line)
         if not args.quiet:
-            print("exported: %s" % args.export)
+            say(args, "exported: %s" % args.export)
+
+    if args.json:
+        print(json.dumps(build_result(args, messages, totals), indent=2))
+        return 0
 
     if not args.quiet:
         print("---")
