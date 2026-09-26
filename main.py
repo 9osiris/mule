@@ -10,7 +10,8 @@ from config import load_config, load_profile
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name, \
-    latest_session
+    latest_session, search_sessions, rename_session, delete_session, \
+    session_stats
 from tools import ToolSet
 from ui import init_color, red, yellow
 
@@ -67,6 +68,8 @@ def build_parser(cfg):
                    help="resume a saved session, then continue with the task")
     p.add_argument("--list-sessions", action="store_true",
                    help="list saved sessions and exit")
+    p.add_argument("--search-sessions", default=None, metavar="QUERY",
+                   help="search saved sessions for text and exit")
     p.add_argument("--ask", action="store_true",
                    help="ask for confirmation before shell commands and file writes")
     p.add_argument("--undo", action="store_true",
@@ -149,7 +152,8 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-SUBCOMMANDS = ("init", "config", "doctor", "completion", "models")
+SUBCOMMANDS = ("init", "config", "doctor", "completion", "models",
+               "sessions")
 
 
 def run_subcommand(name, rest):
@@ -195,8 +199,45 @@ def run_subcommand(name, rest):
             pin, pout = PRICING[model]
             print("%-14s %10.2f %10.2f" % (model, pin, pout))
         return 0
+    if name == "sessions":
+        return cmd_sessions(rest)
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
+
+
+def cmd_sessions(rest):
+    # mule sessions list | rename OLD NEW | rm NAME | stats
+    if not rest or rest[0] not in ("list", "rename", "rm", "stats"):
+        print("usage: mule sessions list | rename OLD NEW | rm NAME | stats",
+              file=sys.stderr)
+        return 2
+    action = rest[0]
+    try:
+        if action == "list":
+            for name in list_sessions():
+                print(name)
+        elif action == "rename":
+            if len(rest) < 3:
+                print("usage: mule sessions rename OLD NEW",
+                      file=sys.stderr)
+                return 2
+            print("renamed: %s" % rename_session(rest[1], rest[2]))
+        elif action == "rm":
+            if len(rest) < 2:
+                print("usage: mule sessions rm NAME", file=sys.stderr)
+                return 2
+            print("removed: %s" % delete_session(rest[1]))
+        elif action == "stats":
+            rows = session_stats()
+            if not rows:
+                print("(no sessions)")
+            for r in rows:
+                print("%-24s %4d messages %8d bytes"
+                      % (r["name"], r["messages"], r["bytes"]))
+    except ValueError as e:
+        print(red("error: %s" % e), file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_config(rest):
@@ -305,6 +346,13 @@ def make_chat_fn(args, client):
         return reply
 
     chat_fn.model_box = model_box
+
+    def set_model(name):
+        # switch models mid-session, cost tracking follows along
+        client.model = name
+        model_box["model"] = name
+
+    chat_fn.set_model = set_model
     return chat_fn
 
 
@@ -445,6 +493,7 @@ def reflect_answer(args, chat_fn, messages, track, step):
 def run_interactive(args, tools, system, messages, task,
                     chat_fn, show, track, totals, todos):
     # prompt loop: each line is a task, history carries over
+    from repl import compress_history
     box = {"messages": messages}
     commands = load_commands(
         os.path.join(os.path.abspath(args.root), ".mule", "commands"))
@@ -452,15 +501,24 @@ def run_interactive(args, tools, system, messages, task,
     def save_fn(name):
         return save_session(name, box["messages"])
 
+    def set_model(name):
+        chat_fn.set_model(name)
+        ctx["model"] = name
+
     ctx = {"write": print, "tools": tools, "totals": totals,
            "model": args.model, "save_fn": save_fn,
-           "commands": commands}
+           "commands": commands, "set_model": set_model,
+           "last_task": None}
 
     def on_slash(line):
         action = handle_slash(line, ctx)
         if action == "clear":
             box["messages"] = [{"role": "system", "content": system}]
             print("history cleared")
+        elif action == "compress":
+            box["messages"] = compress_history(chat_fn, box["messages"],
+                                               track)
+            print("history compressed to a recap")
         elif isinstance(action, tuple) and action[0] == "run":
             # a custom command becomes the next task
             on_task(action[1])
@@ -468,6 +526,7 @@ def run_interactive(args, tools, system, messages, task,
         return action
 
     def on_task(line):
+        ctx["last_task"] = line
         try:
             box["messages"] = run(line, chat_fn, tools,
                                   system_prompt=system,
@@ -488,7 +547,24 @@ def run_interactive(args, tools, system, messages, task,
     if task:
         # a task on the command line runs first, then the loop takes over
         on_task(task)
+    # persistent input history across sessions
+    histfile = os.path.expanduser("~/.mule/history")
+    os.makedirs(os.path.dirname(histfile), exist_ok=True)
+    try:
+        import readline
+    except ImportError:
+        readline = None
+    if readline is not None:
+        try:
+            readline.read_history_file(histfile)
+        except OSError:
+            pass
+        import atexit
+        atexit.register(readline.write_history_file, histfile)
     repl_loop(input, print, on_task, on_slash)
+    if len(box["messages"]) > 1:
+        path = save_session(auto_name(), box["messages"])
+        print("auto-saved session: %s" % path)
     if args.export:
         from sessions import export_session
         export_session(args.export, box["messages"],
@@ -540,6 +616,14 @@ def main(argv=None):
     if args.list_sessions:
         for name in list_sessions():
             print(name)
+        return 0
+
+    if args.search_sessions:
+        hits = search_sessions(args.search_sessions)
+        if not hits:
+            print("no sessions matching %r" % args.search_sessions)
+        for name, snippet in hits:
+            print("%s: %s" % (name, snippet))
         return 0
 
     tools = ToolSet(args.root,
@@ -680,6 +764,13 @@ def main(argv=None):
         path = save_session(name, messages)
         if not args.quiet:
             say(args, "saved session: %s" % path)
+    else:
+        # every run is kept, named by timestamp, so --continue
+        # and --search-sessions always have something to find.
+        # stays silent in --print mode, which wants stdout clean.
+        path = save_session(auto_name(), messages)
+        if not args.quiet and not args.print_mode:
+            say(args, "auto-saved session: %s" % path)
 
     used_model = model_box["model"]
     cost_line = "tokens: %s in / %s out, cost %s" % (
