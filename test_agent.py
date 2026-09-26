@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 15)
+      and len(seen["bodies"][0]["tools"]) == 17)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -2299,6 +2299,37 @@ check("--time-limit parses",
 check("--parallel-tools parses",
       parse_args(["t", "--parallel-tools"]).parallel_tools is True)
 check("--verbose parses", parse_args(["t", "--verbose"]).verbose is True)
+
+# --- batch B: more agent tools ---
+
+_grep_root = tempfile.mkdtemp()
+open(os.path.join(_grep_root, "a.py"), "w").write("import os\nprint('hello')\n")
+open(os.path.join(_grep_root, "b.txt"), "w").write("hello world\nbye\n")
+_grep_tools = ToolSet(_grep_root)
+check("grep finds matches as file:line",
+      _grep_tools.call("grep", {"pattern": "hello"})
+      == "a.py:2: print('hello')\nb.txt:1: hello world")
+check("grep honors the glob filter",
+      _grep_tools.call("grep", {"pattern": "hello", "glob": "*.txt"})
+      == "b.txt:1: hello world")
+check("grep reports no matches",
+      _grep_tools.call("grep", {"pattern": "zzz"}) == "no matches for 'zzz'")
+check("grep rejects bad regex",
+      _grep_tools.call("grep", {"pattern": "["}).startswith("error: bad pattern"))
+check("grep is registered", "grep" in _grep_tools.schemas()[0] or
+      any(s["function"]["name"] == "grep" for s in _grep_tools.schemas()))
+
+_find_root = tempfile.mkdtemp()
+os.makedirs(os.path.join(_find_root, "sub"))
+open(os.path.join(_find_root, "a.py"), "w").write("x")
+open(os.path.join(_find_root, "sub", "b.py"), "w").write("x")
+open(os.path.join(_find_root, "sub", "c.txt"), "w").write("x")
+_find_tools = ToolSet(_find_root)
+check("find locates files recursively",
+      _find_tools.call("find", {"pattern": "*.py"}) == "a.py\nsub/b.py")
+check("find reports no matches",
+      _find_tools.call("find", {"pattern": "*.go"})
+      == "no files matching '*.go'")
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

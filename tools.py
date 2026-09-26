@@ -1,6 +1,7 @@
 import base64
 import datetime
 import difflib
+import fnmatch
 import html
 import json
 import os
@@ -251,6 +252,20 @@ class ToolSet:
                                "can look at (png/jpg/gif/webp)",
                 "parameters": {"path": "relative path of the image"},
                 "run": self.read_image,
+            },
+            "grep": {
+                "description": "search file contents for a regex pattern, "
+                               "returns file:line matches",
+                "parameters": {"pattern": "regex to search for",
+                               "path": "where to search, default '.'",
+                               "glob": "filename filter like '*.py', default '*'"},
+                "run": self.grep,
+            },
+            "find": {
+                "description": "find files by name pattern, returns relative paths",
+                "parameters": {"pattern": "glob like '*.py' or 'test*'",
+                               "path": "where to search, default '.'"},
+                "run": self.find,
             },
         }
 
@@ -592,3 +607,49 @@ class ToolSet:
             if snippet:
                 lines.append("   %s" % snippet)
         return "\n".join(lines)
+
+    def grep(self, pattern, path=".", glob="*"):
+        # walk the tree, print file:line for every line matching
+        # the regex. skips binaries, caps at 100 hits.
+        try:
+            rx = re.compile(pattern or "")
+        except re.error as e:
+            return "error: bad pattern: %s" % e
+        base = self._resolve(path)
+        if not os.path.isdir(base):
+            return "error: not a directory: %s" % path
+        hits = []
+        for dirpath, _, files in os.walk(base):
+            for name in sorted(files):
+                if not fnmatch.fnmatch(name, glob or "*"):
+                    continue
+                full = os.path.join(dirpath, name)
+                rel = os.path.relpath(full, self.root)
+                try:
+                    with open(full, "r", errors="replace") as f:
+                        for i, line in enumerate(f, 1):
+                            if "\x00" in line:
+                                break  # binary, skip the file
+                            if rx.search(line):
+                                hits.append("%s:%d: %s"
+                                            % (rel, i, line.rstrip()))
+                            if len(hits) >= 100:
+                                return "\n".join(hits) + "\n...[truncated]"
+                except OSError:
+                    continue
+        return "\n".join(hits) or "no matches for %r" % pattern
+
+    def find(self, pattern="*", path="."):
+        # find files by name, glob against the basename
+        base = self._resolve(path)
+        if not os.path.isdir(base):
+            return "error: not a directory: %s" % path
+        found = []
+        for dirpath, _, files in os.walk(base):
+            for name in sorted(files):
+                if fnmatch.fnmatch(name, pattern or "*"):
+                    found.append(os.path.relpath(
+                        os.path.join(dirpath, name), self.root))
+                if len(found) >= 100:
+                    return "\n".join(found) + "\n...[truncated]"
+        return "\n".join(found) or "no files matching %r" % pattern
