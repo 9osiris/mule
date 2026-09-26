@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 
 
 SYSTEM_PROMPT = """You are a coding agent working inside a project directory.
@@ -104,7 +106,8 @@ def compact_messages(messages, chat, keep_last=10):
 
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         messages=None, usage_cb=None, on_todos=None, context_budget=None,
-        dry_run=False):
+        dry_run=False, max_tools=None, time_limit=None, on_timing=None,
+        parallel_tools=False, tool_timeout=None):
     """the loop. chat(messages) -> assistant message dict, tools is a ToolSet.
     dry_run prints what would happen without executing any tool."""
     if messages is None:
@@ -119,8 +122,55 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         messages = list(messages)
 
     last_todos = None
+    tool_count = 0
+    retried = set()  # tool call ids that already got one guided retry
+    deadline = (time.monotonic() + time_limit
+                if time_limit is not None else None)
+
+    def _exec(call):
+        # run one tool call, returns the result string
+        name = call["function"]["name"]
+        try:
+            args = json.loads(call["function"].get("arguments") or "{}")
+            bad_args = False
+        except json.JSONDecodeError:
+            args = {}
+            bad_args = True
+        if bad_args:
+            return "error: arguments were not valid json"
+        if dry_run:
+            # show the plan, touch nothing
+            return "dry run, not executed: %s(%s)" % (
+                name, json.dumps(args, sort_keys=True))
+        if tool_timeout is None:
+            return tools.call(name, args)
+        # slow tools get cut off, not waited on forever.
+        # the thread is a daemon, so a stuck tool can't
+        # hold the process open after mule exits.
+        import queue as queue_mod
+        q = queue_mod.Queue()
+
+        def _target():
+            try:
+                q.put(tools.call(name, args))
+            except Exception as e:  # tools.call stringifies, this is backup
+                q.put("error: %s" % e)
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        try:
+            return q.get(timeout=tool_timeout)
+        except queue_mod.Empty:
+            return "error: tool '%s' timed out after %ss" % (
+                name, tool_timeout)
 
     for step in range(max_steps):
+        if deadline is not None and time.monotonic() >= deadline:
+            messages.append({
+                "role": "assistant",
+                "content": "stopped: hit time limit (%ss)" % time_limit,
+            })
+            return messages
         if (context_budget and context_size(messages) > context_budget
                 and len(messages) > 12):
             # history got too big, squash the old stuff down.
@@ -129,7 +179,10 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
             if usage_cb and summary_usage:
                 usage_cb(step + 1, summary_usage)
 
+        t0 = time.monotonic()
         reply = chat(messages, tools.schemas())
+        if on_timing:
+            on_timing(step + 1, time.monotonic() - t0)
         stop = usage_cb(step + 1, reply.get("usage")) if usage_cb else False
         messages.append(_clean_reply(reply))
         if stop:
@@ -144,28 +197,47 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         if not calls:
             return messages  # model is done talking, no tools wanted
 
-        for call in calls:
-            name = call["function"]["name"]
-            try:
-                args = json.loads(call["function"].get("arguments") or "{}")
-                bad_args = False
-            except json.JSONDecodeError:
-                args = {}
-                bad_args = True
-            if bad_args:
-                result = "error: arguments were not valid json"
-            elif dry_run:
-                # show the plan, touch nothing
-                result = "dry run, not executed: %s(%s)" % (
-                    name, json.dumps(args, sort_keys=True))
-            else:
-                result = tools.call(name, args)
+        if max_tools is not None and tool_count >= max_tools:
+            messages.append({
+                "role": "assistant",
+                "content": "stopped: hit max tools (%d)" % max_tools,
+            })
+            return messages
 
+        runnable = calls
+        if (max_tools is not None
+                and tool_count + len(calls) > max_tools):
+            # run what fits under the cap, the rest get an error
+            # result so every tool_call still has a matching result
+            runnable = calls[:max_tools - tool_count]
+
+        if parallel_tools and len(runnable) > 1 and not dry_run:
+            # independent calls go out together, results stay ordered
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                ran = list(pool.map(_exec, runnable))
+        else:
+            ran = [_exec(c) for c in runnable]
+        tool_count += len(runnable)
+        results = ran + ["error: hit max tools (%d), call not executed"
+                         % max_tools for _ in calls[len(runnable):]]
+
+        for call, result in zip(calls, results):
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],
                 "content": str(result),
             })
+            if (str(result).startswith("error:")
+                    and call["id"] not in retried):
+                # one guided retry: nudge the model to fix the call
+                retried.add(call["id"])
+                messages.append({
+                    "role": "user",
+                    "content": "that tool call failed: %s. fix the "
+                               "arguments and try once more, or move on."
+                               % result,
+                })
 
         if on_todos and hasattr(tools, "progress_line"):
             line = tools.progress_line()
@@ -184,10 +256,10 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
 
 
 def _clean_reply(reply):
-    # keep only what the api needs back
-    msg = {"role": "assistant"}
-    if reply.get("content"):
-        msg["content"] = reply["content"]
+    # keep only what the api needs back. content is always present:
+    # some gateways reject assistant messages that carry tool calls
+    # but no content field at all.
+    msg = {"role": "assistant", "content": reply.get("content") or ""}
     if reply.get("tool_calls"):
         msg["tool_calls"] = reply["tool_calls"]
     return msg

@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from agent import run, last_answer
+from agent import run, last_answer, _clean_reply
 from client import ChatClient
 from tools import ToolSet
 
@@ -188,6 +188,21 @@ plain_heads = seen_heads[-1]
 check("other base urls do not send originator header",
       "Originator" not in plain_heads)
 hserver.shutdown()
+
+# assistant messages echoed back always carry a content field, even
+# when the model only returned tool calls (some gateways 422 without it)
+
+tc_only = {"role": "assistant",
+           "tool_calls": [{"id": "c1", "function": {
+               "name": "list_dir", "arguments": "{}"}}]}
+cleaned = _clean_reply(tc_only)
+check("tool-only reply keeps a content field",
+      cleaned.get("content") == "")
+check("tool-only reply keeps its tool calls",
+      cleaned.get("tool_calls") == tc_only["tool_calls"])
+check("text reply content passes through",
+      _clean_reply({"role": "assistant",
+                    "content": "hi"})["content"] == "hi")
 
 # edit_file: patch one exact string
 
