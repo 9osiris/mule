@@ -1,6 +1,8 @@
+import datetime
 import html
 import os
 import re
+import shutil
 import subprocess
 import urllib.parse
 import urllib.request
@@ -10,11 +12,40 @@ MAX_OUTPUT = 20_000
 MAX_FETCH = 200_000  # cap on downloaded pages
 
 
+class BackupStore:
+    # copies of files before they get modified, newest last
+    def __init__(self, backup_dir=None):
+        self.dir = backup_dir or os.path.join(
+            os.path.expanduser("~"), ".mule", "backups")
+        os.makedirs(self.dir, exist_ok=True)
+        self.stack = []
+
+    def stash(self, full_path):
+        # copy an existing file aside before it changes
+        if not os.path.isfile(full_path):
+            return None
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        dest = os.path.join(self.dir,
+                            "%s-%s" % (stamp, os.path.basename(full_path)))
+        shutil.copy2(full_path, dest)
+        self.stack.append((full_path, dest))
+        return dest
+
+    def undo_last(self):
+        # restore the most recently stashed file
+        if not self.stack:
+            return None
+        full_path, dest = self.stack.pop()
+        shutil.copy2(dest, full_path)
+        return full_path
+
+
 class ToolSet:
     def __init__(self, root, confirm=None):
         self.root = os.path.abspath(root)
         # confirm(command) -> bool, asked before every shell command
         self.confirm = confirm
+        self.backups = BackupStore()
         self.tools = {
             "read_file": {
                 "description": "read a text file, path relative to project root",
@@ -92,8 +123,17 @@ class ToolSet:
             data = data[:MAX_READ] + "\n...[truncated]"
         return data
 
+    def undo_last(self):
+        # restore the most recently changed file, for /undo and --undo
+        restored = self.backups.undo_last()
+        if restored is None:
+            return "nothing to undo"
+        return "restored %s" % os.path.relpath(restored, self.root)
+
     def write_file(self, path, content=""):
         full = self._resolve(path)
+        if os.path.isfile(full):
+            self.backups.stash(full)
         os.makedirs(os.path.dirname(full) or self.root, exist_ok=True)
         with open(full, "w") as f:
             f.write(content or "")
@@ -114,6 +154,7 @@ class ToolSet:
         if count > 1:
             return ("error: old string matches %d times in %s, "
                     "be more specific" % (count, path))
+        self.backups.stash(full)
         with open(full, "w") as f:
             f.write(data.replace(old, new or "", 1))
         return "edited %s" % path

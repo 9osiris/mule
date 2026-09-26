@@ -713,6 +713,42 @@ check("--retries defaults to 3", parse_args(["task"]).retries == 3)
 check("--retries parses",
       parse_args(["task", "--retries", "0"]).retries == 0)
 
+# undo: backups before writes and edits, restored lifo
+
+from tools import BackupStore
+
+uroot = tempfile.mkdtemp()
+utools = ToolSet(uroot)
+utools.backups = BackupStore(backup_dir=tempfile.mkdtemp())
+
+target = os.path.join(uroot, "f.txt")
+open(target, "w").write("original\n")
+
+utools.call("write_file", {"path": "f.txt", "content": "v2\n"})
+check("write stashes a backup", len(utools.backups.stack) == 1)
+check("write changed the file", open(target).read() == "v2\n")
+check("undo restores", utools.undo_last() == "restored f.txt")
+check("undo brought back the original",
+      open(target).read() == "original\n")
+check("undo stack empties", utools.undo_last() == "nothing to undo")
+
+utools.call("write_file", {"path": "new.txt", "content": "fresh\n"})
+check("new file needs no backup", len(utools.backups.stack) == 0)
+check("undo with no backups says so",
+      utools.undo_last() == "nothing to undo")
+
+utools.call("edit_file", {"path": "f.txt", "old": "original",
+                          "new": "edited"})
+check("edit stashes a backup", len(utools.backups.stack) == 1)
+utools.call("edit_file", {"path": "f.txt", "old": "edited",
+                          "new": "edited2"})
+check("two edits, two backups", len(utools.backups.stack) == 2)
+utools.undo_last()
+check("undo is lifo", open(target).read() == "edited\n")
+utools.undo_last()
+check("second undo restores original",
+      open(target).read() == "original\n")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
