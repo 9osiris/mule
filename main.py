@@ -11,6 +11,8 @@ from config import load_config, load_profile, config_problems
 # exit codes: 0 ok, 2 budget hit (or usage error), 3 runtime error,
 # 130 user pressed ctrl-c
 EXIT_OK, EXIT_BUDGET, EXIT_ERROR, EXIT_CANCELLED = 0, 2, 3, 130
+
+__version__ = "0.9.0"
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name, \
@@ -35,6 +37,8 @@ def _num(env_raw, cfg_raw, default, cast):
 def build_parser(cfg):
     p = argparse.ArgumentParser(
         description="a minimal coding agent for any openai-compatible api")
+    p.add_argument("--version", action="version",
+                   version="mule %s" % __version__)
     p.add_argument("task", nargs="?", help="what to do, or read from stdin")
     p.add_argument("--model",
                    default=os.environ.get("MULE_MODEL",
@@ -199,7 +203,7 @@ def parse_args(argv=None):
 
 
 SUBCOMMANDS = ("init", "config", "doctor", "completion", "models",
-               "sessions", "help", "examples")
+               "sessions", "help", "examples", "demo")
 
 
 def run_subcommand(name, rest):
@@ -251,8 +255,64 @@ def run_subcommand(name, rest):
         return cmd_help(rest)
     if name == "examples":
         return cmd_examples()
+    if name == "demo":
+        return cmd_demo(rest)
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
+
+
+def _demo_message(body):
+    # the fake model: lists the dir once, then reports back
+    messages = body.get("messages", [])
+    saw_tool_result = any(m.get("role") == "tool" for m in messages)
+    if not saw_tool_result:
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "demo-1", "type": "function",
+                                "function": {"name": "list_dir",
+                                             "arguments": "{}"}}]}
+    listing = next((m.get("content", "") for m in messages
+                    if m.get("role") == "tool"), "")
+    n = len([line for line in listing.splitlines() if line.strip()])
+    return {"role": "assistant",
+            "content": "demo done. the fake model saw %d entries in "
+                       "the project root. set OPENAI_API_KEY and run "
+                       "mule for real work." % n}
+
+
+def cmd_demo(rest):
+    # try the whole loop with no api key: a fake model on localhost
+    # lists the project dir, then writes its summary
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    class DemoHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            data = json.dumps({
+                "choices": [{"message": _demo_message(body)}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), DemoHandler)
+    port = server.server_port
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    task = " ".join(rest) or "list the files in this project"
+    print("demo mode: fake model on 127.0.0.1:%d" % port)
+    try:
+        return main(["--base-url", "http://127.0.0.1:%d/v1" % port,
+                     "--api-key", "demo", "--model", "demo-model",
+                     "--max-steps", "6", "--no-stream", task])
+    finally:
+        server.shutdown()
 
 
 EXAMPLES = """examples:
@@ -664,7 +724,7 @@ def run_interactive(args, tools, system, messages, task,
     ctx = {"write": print, "tools": tools, "totals": totals,
            "model": args.model, "save_fn": save_fn,
            "commands": commands, "set_model": set_model,
-           "last_task": None}
+           "last_task": None, "version": __version__}
 
     def on_slash(line):
         action = handle_slash(line, ctx)

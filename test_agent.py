@@ -3098,6 +3098,51 @@ check("no warning for clean files", len(_warns) == 1)
 _st4.grep("AWS", ".")
 check("grep warns when results contain secrets", len(_warns) == 2)
 
+# --version, /bug, mule demo
+
+from main import __version__
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    try:
+        _main_mod.main(["--version"])
+        _ver_exit = None
+    except SystemExit as _e:
+        _ver_exit = _e.code
+check("--version prints the version",
+      _ver_exit == 0 and _buf.getvalue().strip() == "mule " + __version__)
+
+from repl import handle_slash
+
+_bug_out = []
+handle_slash("/bug it crashed on startup",
+             {"write": _bug_out.append, "version": "0.9.0"})
+check("/bug prints a prefilled issue url",
+      len(_bug_out) == 1
+      and _bug_out[0].startswith(
+          "file it here:\nhttps://github.com/9osiris/mule/issues/new?")
+      and "title=it%20crashed%20on%20startup" in _bug_out[0]
+      and "mule%20version%3A%200.9.0" in _bug_out[0])
+_bug_out2 = []
+handle_slash("/bug", {"write": _bug_out2.append, "version": "0.9.0"})
+check("/bug defaults the title", "title=bug%20report" in _bug_out2[0])
+
+_demo_msg = _main_mod._demo_message({"messages": []})
+check("demo model lists the dir first",
+      _demo_msg["tool_calls"][0]["function"]["name"] == "list_dir")
+_demo_msg2 = _main_mod._demo_message(
+    {"messages": [{"role": "tool", "content": "a\nb\nc"}]})
+check("demo model summarizes after the tool result",
+      _demo_msg2["content"].startswith("demo done")
+      and "3 entries" in _demo_msg2["content"])
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    with contextlib.redirect_stderr(io.StringIO()):
+        _rc = _main_mod.main(["demo"])
+check("mule demo runs the loop with no api key",
+      _rc == 0 and "demo done" in _buf.getvalue())
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

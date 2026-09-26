@@ -124,14 +124,14 @@ def handle_slash(line, ctx):
     return None
 
 
-def repl_loop(read_line, write, on_task, on_slash, prompt="> "):
+def repl_loop(read_line, write, on_task, on_slash):
     # read_line(prompt) raises EOFError/KeyboardInterrupt to leave.
     # a line starting with ``` opens a multiline block: everything
     # until the closing ``` becomes one task.
     write("interactive mode. /help for commands, /quit to leave.")
     while True:
         try:
-            line = read_line(prompt)
+            line = read_line("mule> ")
         except (EOFError, KeyboardInterrupt):
             write("")
             break
