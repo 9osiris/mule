@@ -290,6 +290,22 @@ class ToolSet:
                 "parameters": {"path": "relative path"},
                 "run": self.file_info,
             },
+            "git_status": {
+                "description": "git status, short format",
+                "parameters": {},
+                "run": self.git_status,
+            },
+            "git_diff": {
+                "description": "git diff of uncommitted changes, "
+                               "optionally for one path",
+                "parameters": {"path": "optional relative path"},
+                "run": self.git_diff,
+            },
+            "git_log": {
+                "description": "recent commits, one line each",
+                "parameters": {"count": "how many, default 10"},
+                "run": self.git_log,
+            },
         }
 
     def schemas(self):
@@ -778,3 +794,30 @@ class ToolSet:
             st.st_mtime).strftime("%Y-%m-%d %H:%M")
         return "path: %s\ntype: %s\nsize: %d bytes\nmodified: %s" % (
             path, kind, st.st_size, when)
+
+    def _git(self, *args):
+        # run git in the project root, error when it is not a repo
+        try:
+            proc = subprocess.run(
+                ["git"] + list(args), cwd=self.root,
+                capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return "error: git failed: %s" % e
+        if proc.returncode != 0:
+            return "error: git: %s" % (proc.stderr.strip()
+                                       or "not a git repository")
+        return proc.stdout.rstrip() or "(no output)"
+
+    def git_status(self):
+        return self._git("status", "--short")
+
+    def git_diff(self, path=""):
+        args = ["diff", "--"] + ([path] if path else [])
+        return self._git(*args)
+
+    def git_log(self, count="10"):
+        try:
+            n = max(1, min(int(count), 50))
+        except (TypeError, ValueError):
+            n = 10
+        return self._git("log", "--oneline", "-n", str(n))

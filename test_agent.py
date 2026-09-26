@@ -1,6 +1,7 @@
 """no api key needed. fake model + fake openai server."""
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -139,7 +140,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 21)
+      and len(seen["bodies"][0]["tools"]) == 24)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -2387,6 +2388,28 @@ check("file_info reports dirs",
       "type: dir" in _fi_tools.call("file_info", {"path": "."}))
 check("file_info errors on missing paths",
       _fi_tools.call("file_info", {"path": "nope"}).startswith("error:"))
+
+_git_root = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q"], cwd=_git_root)
+subprocess.run(["git", "config", "user.email", "t@t"], cwd=_git_root)
+subprocess.run(["git", "config", "user.name", "t"], cwd=_git_root)
+open(os.path.join(_git_root, "a.txt"), "w").write("v1\n")
+subprocess.run(["git", "add", "a.txt"], cwd=_git_root)
+subprocess.run(["git", "commit", "-qm", "first"], cwd=_git_root)
+open(os.path.join(_git_root, "a.txt"), "w").write("v2\n")
+_git_tools = ToolSet(_git_root)
+check("git_status shows the dirty file",
+      "a.txt" in _git_tools.call("git_status", {}))
+check("git_diff shows the change",
+      "v2" in _git_tools.call("git_diff", {})
+      and "-v1" in _git_tools.call("git_diff", {"path": "a.txt"}))
+check("git_log lists the commit",
+      "first" in _git_tools.call("git_log", {"count": "5"}))
+_nogit_tools = ToolSet(tempfile.mkdtemp())
+check("git_status errors outside a repo",
+      _nogit_tools.call("git_status", {}).startswith("error:"))
+check("git_log errors outside a repo",
+      _nogit_tools.call("git_log", {}).startswith("error:"))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
