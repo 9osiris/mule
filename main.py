@@ -172,6 +172,10 @@ def build_parser(cfg):
                    help="append all output to FILE as well as the terminal")
     p.add_argument("--trace", default=cfg.get("trace"), metavar="FILE",
                    help="write raw api request/response pairs to FILE as jsonl")
+    p.add_argument("--tool-timeout", type=float,
+                   default=cfg.get("tool_timeout"),
+                   metavar="SECONDS",
+                   help="kill the wait on any single tool call after SECONDS")
     return p
 
 
@@ -951,7 +955,8 @@ def _run(args):
                        max_tools=args.max_tools,
                        time_limit=args.time_limit,
                        on_timing=timing,
-                       parallel_tools=args.parallel_tools)
+                       parallel_tools=args.parallel_tools,
+                       tool_timeout=args.tool_timeout)
     except RuntimeError as e:
         print(red("error: %s" % e), file=sys.stderr)
         return EXIT_ERROR

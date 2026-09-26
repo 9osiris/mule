@@ -40,7 +40,7 @@ SCHEMA = {
     "no_network": bool, "allow_tools": str, "deny_tools": str,
     "fallback_model": str, "max_tools": int,
     "time_limit": (int, float), "temperature": (int, float),
-    "log_file": str, "trace": str,
+    "log_file": str, "trace": str, "tool_timeout": (int, float),
 }
 
 

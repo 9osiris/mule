@@ -2988,6 +2988,44 @@ check("--log-file mirrors stdout to the file",
 check("--log-file parses",
       parse_args(["t", "--log-file", "x"]).log_file == "x")
 
+# --tool-timeout: slow tools get cut off instead of hanging the run
+
+_slow_tools = ToolSet(tempfile.mkdtemp())
+
+
+def _slow():
+    _time.sleep(30)
+    return "too late"
+
+
+_slow_tools.tools["slow"] = {"name": "slow", "description": "hangs",
+                             "parameters": {}, "run": _slow}
+_slow_n = {"n": 0}
+
+
+def _slow_chat(messages, tools=None, stop=None):
+    _slow_n["n"] += 1
+    if _slow_n["n"] == 1:
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "1", "function": {"name": "slow",
+                                                       "arguments": "{}"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    return {"role": "assistant", "content": "done",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+import time as _time
+_t0 = _time.monotonic()
+_slow_msgs = run("t", _slow_chat, _slow_tools, tool_timeout=0.5,
+                 max_steps=5)
+_took = _time.monotonic() - _t0
+_tool_results = [m["content"] for m in _slow_msgs if m.get("role") == "tool"]
+check("--tool-timeout cuts off a stuck tool",
+      _took < 10 and len(_tool_results) == 1
+      and "timed out after 0.5s" in _tool_results[0])
+check("--tool-timeout parses",
+      parse_args(["t", "--tool-timeout", "5"]).tool_timeout == 5.0)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

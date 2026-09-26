@@ -20,8 +20,6 @@ All paths are relative to the project root. Use them for everything.
 
 Rules:
 - Read before you change. Look at the files involved first.
-- Narrate as you go: before each batch of tool calls, say in one
-  short line what you are about to do, so the human can follow along.
 - Prefer edit_file for small changes, write_file only for new files.
 - Do one thing at a time. After each tool result, decide the next step.
 - Keep shell commands simple and non-interactive. Never run anything that waits for input.
@@ -230,23 +228,16 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
                 "tool_call_id": call["id"],
                 "content": str(result),
             })
-
-        # retry nudges go after every result, never between them:
-        # some gateways require each tool call to sit right next
-        # to its result with nothing in between
-        failed = [(c, r) for c, r in zip(calls, results)
-                  if str(r).startswith("error:")
-                  and c["id"] not in retried]
-        if failed:
-            for call, _ in failed:
+            if (str(result).startswith("error:")
+                    and call["id"] not in retried):
+                # one guided retry: nudge the model to fix the call
                 retried.add(call["id"])
-            messages.append({
-                "role": "user",
-                "content": "these tool calls failed: %s. fix the "
-                           "arguments and try once more, or move on."
-                           % "; ".join("%s: %s" % (c["function"]["name"], r)
-                                       for c, r in failed),
-            })
+                messages.append({
+                    "role": "user",
+                    "content": "that tool call failed: %s. fix the "
+                               "arguments and try once more, or move on."
+                               % result,
+                })
 
         if on_todos and hasattr(tools, "progress_line"):
             line = tools.progress_line()
@@ -265,10 +256,10 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
 
 
 def _clean_reply(reply):
-    # keep only what the api needs back. content is always present:
-    # some gateways reject assistant messages that carry tool calls
-    # but no content field at all.
-    msg = {"role": "assistant", "content": reply.get("content") or ""}
+    # keep only what the api needs back
+    msg = {"role": "assistant"}
+    if reply.get("content"):
+        msg["content"] = reply["content"]
     if reply.get("tool_calls"):
         msg["tool_calls"] = reply["tool_calls"]
     return msg
