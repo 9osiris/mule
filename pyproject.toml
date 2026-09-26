@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mule"
+version = "0.9.0"
+description = "Minimal coding agent for any OpenAI-compatible API. No dependencies, 50+ flags."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+# pretty terminal ui: markdown rendering, syntax highlighting,
+# live streaming. the core stays stdlib-only without it.
+rich = ["rich>=13"]
+
+[project.scripts]
+mule = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "agent", "client", "tools", "ui", "repl",
+              "config", "cost", "doctor", "sessions", "checkpoints",
+              "complete", "plugins", "scaffold", "skills"]

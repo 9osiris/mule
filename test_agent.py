@@ -3407,7 +3407,7 @@ def _eof_read(p):
     _prompts.append(p)
     raise EOFError()
 repl_loop(_eof_read, lambda s: None, lambda l: None, lambda l: None)
-check("repl prompt is a bare > ", _prompts == ["> "])
+check("repl prompt is a bare ❯ ", _prompts == ["❯ "])
 
 _spin = Spinner("thinking")
 _spin.tick()
@@ -3422,10 +3422,11 @@ with contextlib.redirect_stdout(_buf):
     _show(1, [{"id": "1",
                "function": {"name": "run_shell",
                             "arguments": '{"command": "echo hi"}'}}])
-check("tool calls render as panels",
+check("tool calls render as transcript lines",
       "run_shell" in _buf.getvalue()
       and "command=echo hi" in _buf.getvalue()
-      and "╭─" in _buf.getvalue())
+      and "⏺" in _buf.getvalue()
+      and "╭─" not in _buf.getvalue())
 
 _main_mod.ChatClient = _LogClient
 _buf = io.StringIO()
@@ -3521,6 +3522,134 @@ else:
     os.environ["NO_COLOR"] = _old_nc
 check("NO_COLOR env strips ansi", _rc == 0 and "\033[" not in _out)
 _main_mod.ChatClient = _real_client
+
+# ui overhaul: renderer, transcript lines, repl extras
+
+from ui import get_renderer, PlainRenderer, render_markdown_plain, \
+    tool_call_line, tool_result_line, args_summary, ThreadSpinner, bold
+from repl import expand_at_refs, run_shell_line
+
+_r = get_renderer()
+check("renderer falls back to plain off-terminal",
+      isinstance(_r, PlainRenderer) and _r.name == "plain")
+
+_md = ("# Hello\n\nsome **bold** and `code` here\n\n"
+       "```python\nprint(1)\n```\n")
+_rmd = render_markdown_plain(_md)
+check("plain markdown keeps headings, bold, code",
+      "Hello" in _rmd and "bold" in _rmd and "print(1)" in _rmd
+      and "```" not in _rmd)
+check("plain markdown indents fenced code",
+      "\n  print(1)" in _rmd)
+_rmd_rule = render_markdown_plain("a\n---\nb")
+check("plain markdown renders a rule",
+      "-" * 40 in _rmd_rule and "\n---\n" not in _rmd_rule)
+
+_tcall = tool_call_line("list_dir", args_summary({"path": "."}))
+check("tool call line is compact",
+      "⏺" in _tcall and "list_dir" in _tcall and "path=." in _tcall
+      and "╭─" not in _tcall)
+check("args summary truncates long values",
+      len(args_summary({"x": "y" * 100})) < 80)
+check("long tool args get an ellipsis",
+      tool_call_line("n", "x" * 200).endswith("..."))
+
+_tres = tool_result_line("a\nb\nc\nd")
+check("tool result nests with a line count",
+      _tres.startswith("⎿ ") and "+3 lines" in _tres)
+check("tool errors stay visible",
+      "error: boom" in tool_result_line("error: boom"))
+check("empty tool results say so",
+      "(empty)" in tool_result_line(""))
+
+_ts = ThreadSpinner("thinking", delay=5)
+_ts.start()
+_ts.stop()
+check("thread spinner is safe off-terminal", True)
+
+_at_dir = tempfile.mkdtemp()
+with open(os.path.join(_at_dir, "a.py"), "w") as _f:
+    _f.write("x = 1\n")
+check("@path injects file contents into a fence",
+      "x = 1" in expand_at_refs("explain @a.py", _at_dir)
+      and "```a.py" in expand_at_refs("explain @a.py", _at_dir))
+check("@path leaves missing files alone",
+      expand_at_refs("explain @nope.py", _at_dir) == "explain @nope.py")
+check("@path cannot escape the root",
+      expand_at_refs("read @../secret", _at_dir) == "read @../secret")
+check("@path ignores email addresses",
+      expand_at_refs("mail me@x.com", _at_dir) == "mail me@x.com")
+
+_bang_out = []
+run_shell_line("echo hello", _bang_out.append)
+check("! runs shell commands directly",
+      any("hello" in w for w in _bang_out))
+_bang_out2 = []
+run_shell_line("exit 3", _bang_out2.append)
+check("! reports nonzero exits",
+      any("exit 3" in w for w in _bang_out2))
+
+_bang_tasks = []
+_bang_lines = iter(["!echo hi", "@a.py what is this", "/quit"])
+repl_loop(lambda p: next(_bang_lines), lambda s: None,
+          _bang_tasks.append,
+          lambda l: "quit" if l == "/quit" else None,
+          root=_at_dir)
+check("! lines never reach the agent", len(_bang_tasks) == 1)
+check("@ refs expand before the agent sees them",
+      "x = 1" in _bang_tasks[0])
+
+_fake_calls = {"n": 0}
+
+
+def _fake_chat_or(messages, tools):
+    _fake_calls["n"] += 1
+    if _fake_calls["n"] == 1:
+        return {"content": "",
+                "tool_calls": [{"id": "1",
+                                "function": {"name": "list_dir",
+                                             "arguments": "{}"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    return {"content": "done",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+class _FakeToolsOr:
+    def schemas(self):
+        return []
+
+    def call(self, name, args):
+        return "f1\nf2"
+
+
+_res_seen = []
+run("t", _fake_chat_or, _FakeToolsOr(), max_steps=3,
+    on_result=lambda s, c, r: _res_seen.append((s, c, r)))
+check("on_result sees each step's calls and results",
+      len(_res_seen) == 1 and _res_seen[0][0] == 1
+      and _res_seen[0][1][0]["function"]["name"] == "list_dir"
+      and _res_seen[0][2] == ["f1\nf2"])
+
+from agent import SYSTEM_PROMPT
+check("system prompt keeps small talk tool-free",
+      "Small talk stays small" in SYSTEM_PROMPT
+      and "Do not call any tools for conversation" in SYSTEM_PROMPT)
+with open(os.path.join(os.path.dirname(__file__), "prompt.md")) as _f:
+    _prompt_text = _f.read()
+check("prompt.md mirrors the small talk rule",
+      "Small talk stays small" in _prompt_text)
+
+import ui as _ui_mod2
+if _ui_mod2._RICH:
+    _rr = _ui_mod2.RichRenderer()
+    _rr.print_markdown("# hi\n\n`code`")
+    _rst = _rr.stream()
+    _rst.feed("hello ")
+    _rst.feed("world")
+    _rst.finish()
+    check("rich renderer streams markdown", _rr.name == "rich")
+else:
+    check("rich renderer skipped (not installed)", True)
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

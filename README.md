@@ -223,6 +223,11 @@ turns. slash commands:
 - `/compress` - squash history into a short recap to free context
 - `/undo` - restore the most recently changed file
 - `/bug [TEXT]` - print a prefilled github issue url for the repo
+- `!CMD` - run a shell command directly, the agent never sees it
+- `@PATH` - attach a file's contents to your task
+
+just chatting works too: greetings, thanks, and simple questions
+get a direct reply, no tool calls.
 
 wrap input in triple backticks for multiline tasks. prompt history
 persists across runs in `~/.mule/history` (up/down arrows work).
@@ -402,11 +407,23 @@ script against them: `mule --print "task" || echo "failed: $?"`.
 
 mule has a face: a geometric mule head in bold amber opens every
 run, with the version, model, and project root on one line under
-it. tool calls render as bordered panels, a spinner ticks while
-the model thinks, and a footer closes the run with the model,
-token counts, and cost. full spec in `BRANDING.md`. `--no-color`
-(or the `NO_COLOR` env var) turns all of it off; `--print`,
-`--json`, and `--quiet` never show it in the first place.
+it. tool calls render as compact transcript lines (an amber dot,
+the name, the args) with results nested underneath, a delayed
+spinner ticks while the model thinks, and a footer closes the run
+with the model, token counts, and cost. replies render as
+markdown. full spec in `BRANDING.md`.
+
+install `rich` for the full treatment: syntax-highlighted code
+blocks and live markdown streaming as tokens arrive.
+
+```bash
+pip install rich        # or: pip install mule[rich]
+```
+
+without it, everything still works on plain stdlib: simple ansi
+styling, raw token streaming, same transcript. `--no-color` (or
+the `NO_COLOR` env var) turns all of it off; `--print`, `--json`,
+and `--quiet` never show it in the first place.
 
 ## tests
 
