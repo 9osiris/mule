@@ -1366,6 +1366,32 @@ check("--checkpoint parses",
 check("--restore parses",
       parse_args(["t", "--restore", "c1"]).restore == "c1")
 
+# mule init scaffolding
+
+from scaffold import init_project
+
+initroot = tempfile.mkdtemp()
+created = init_project(initroot)
+check("init creates mule.json",
+      os.path.isfile(os.path.join(initroot, "mule.json")))
+check("init creates prompt.md",
+      os.path.isfile(os.path.join(initroot, "prompt.md")))
+check("init creates an example command",
+      os.path.isfile(os.path.join(initroot, ".mule", "commands",
+                                  "review.md")))
+check("init mule.json parses as json",
+      json.load(open(os.path.join(initroot, "mule.json")))["model"]
+      == "gpt-4o-mini")
+
+try:
+    init_project(initroot)
+    check("init refuses to overwrite", False)
+except FileExistsError:
+    check("init refuses to overwrite", True)
+
+created2 = init_project(initroot, force=True)
+check("init --force overwrites", len(created2) == 3)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

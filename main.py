@@ -24,8 +24,7 @@ def _num(env_raw, cfg_raw, default, cast):
     return default
 
 
-def parse_args(argv=None):
-    cfg = load_config()
+def build_parser(cfg):
     p = argparse.ArgumentParser(
         description="a minimal coding agent for any openai-compatible api")
     p.add_argument("task", nargs="?", help="what to do, or read from stdin")
@@ -83,7 +82,43 @@ def parse_args(argv=None):
                    help="tar the project root to ~/.mule/checkpoints/ before the run")
     p.add_argument("--restore", default=None, metavar="NAME",
                    help="restore a checkpoint and exit")
-    return p.parse_args(argv)
+    p.add_argument("--json", action="store_true",
+                   help="print the result as json for scripting")
+    p.add_argument("--dry-run", action="store_true",
+                   help="show planned tool calls without executing them")
+    p.add_argument("--system", default=None, metavar="TEXT",
+                   help="replace the system prompt with this text")
+    p.add_argument("--append-system", default=None, metavar="TEXT",
+                   help="append this text to the system prompt")
+    p.add_argument("--no-color", action="store_true",
+                   help="disable ansi color output")
+    return p
+
+
+def parse_args(argv=None):
+    cfg = load_config()
+    return build_parser(cfg).parse_args(argv)
+
+
+SUBCOMMANDS = ("init", "config", "doctor", "completion", "models")
+
+
+def run_subcommand(name, rest):
+    # mule <subcommand>: init/config/doctor/completion/models
+    if name == "init":
+        from scaffold import init_project
+        force = "--force" in rest
+        target = next((a for a in rest if not a.startswith("-")), ".")
+        try:
+            created = init_project(target, force=force)
+        except FileExistsError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 1
+        for path in created:
+            print("created %s" % path)
+        return 0
+    print("unknown subcommand: %s" % name, file=sys.stderr)
+    return 2
 
 
 def ask_cmd(command):
@@ -220,6 +255,9 @@ def run_interactive(args, tools, system, messages, task,
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in SUBCOMMANDS:
+        return run_subcommand(argv[0], argv[1:])
     args = parse_args(argv)
 
     if args.list_sessions:
