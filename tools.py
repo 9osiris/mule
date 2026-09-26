@@ -273,6 +273,12 @@ class ToolSet:
                                "depth": "how deep to go, default 3"},
                 "run": self.tree,
             },
+            "read_many": {
+                "description": "read several files at once, each headed "
+                               "by its path",
+                "parameters": {"paths": "json list of relative paths"},
+                "run": self.read_many,
+            },
         }
 
     def schemas(self):
@@ -693,3 +699,24 @@ class ToolSet:
 
         walk(base, "", 1)
         return "\n".join(lines)
+
+    def read_many(self, paths="[]"):
+        # read a batch of files in one call, capped at 10
+        try:
+            wanted = json.loads(paths or "[]")
+        except ValueError:
+            return "error: paths must be a json list"
+        if not isinstance(wanted, list):
+            return "error: paths must be a json list"
+        parts = []
+        for p in wanted[:10]:
+            full = self._resolve(p)
+            if not os.path.isfile(full):
+                parts.append("=== %s ===\nerror: no such file" % p)
+                continue
+            with open(full, "r", errors="replace") as f:
+                data = f.read(MAX_READ + 1)
+            if len(data) > MAX_READ:
+                data = data[:MAX_READ] + "\n...[truncated]"
+            parts.append("=== %s ===\n%s" % (p, data))
+        return "\n\n".join(parts) or "(no files given)"

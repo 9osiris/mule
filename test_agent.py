@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 18)
+      and len(seen["bodies"][0]["tools"]) == 19)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -2342,6 +2342,20 @@ open(os.path.join(_find_root, "sub", "deep", "x.txt"), "w").write("x")
 check("tree depth 1 hides nested content",
       "deep/" not in _tree_tools.call("tree", {"path": ".", "depth": "1"})
       and "deep/" in _tree_tools.call("tree", {"path": ".", "depth": "3"}))
+
+_rm_root = tempfile.mkdtemp()
+open(os.path.join(_rm_root, "one.txt"), "w").write("first")
+open(os.path.join(_rm_root, "two.txt"), "w").write("second")
+_rm_tools = ToolSet(_rm_root)
+_rm_out = _rm_tools.call("read_many", {"paths": '["one.txt", "two.txt"]'})
+check("read_many reads every file",
+      "=== one.txt ===\nfirst" in _rm_out
+      and "=== two.txt ===\nsecond" in _rm_out)
+check("read_many flags missing files",
+      "error: no such file" in _rm_tools.call(
+          "read_many", {"paths": '["nope.txt"]'}))
+check("read_many rejects bad json",
+      _rm_tools.call("read_many", {"paths": "nope"}).startswith("error:"))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
