@@ -44,13 +44,21 @@ python main.py "summarize the repo layout" \
 - `--timeout SEC` - api request timeout (default: 120)
 - `--retries N` - retries on 429/5xx with exponential backoff (default: 3)
 - `--max-cost DOLLARS` - stop the agent when session cost exceeds this
+- `--plan` - the model writes a plan first; you approve (y), reject (n),
+  or ask for one revision (r) before any tool runs
+- `--context-budget CHARS` - squash old history into a summary past this
+  many chars of conversation (default: 100000)
+- `--export PATH` - write the session transcript to a markdown file
+- `--checkpoint NAME` - tar the project root to `~/.mule/checkpoints/`
+  before the run (skips .git and caches)
+- `--restore NAME` - restore a checkpoint over the project root and exit
 
 ## config file
 
 `mule.json` in the current directory sets defaults, and
 `~/.config/mule/mule.json` sets global ones. the local file wins
 over the global one. recognized keys: `model`, `base_url`,
-`api_key`, `max_steps`, `timeout`, `retries`, `root`.
+`api_key`, `max_steps`, `timeout`, `retries`, `context_budget`, `root`.
 
 ```json
 {
@@ -62,7 +70,7 @@ over the global one. recognized keys: `model`, `base_url`,
 ```
 
 precedence: flags beat env vars (`MULE_MODEL`, `MULE_BASE_URL`,
-`MULE_MAX_STEPS`, `MULE_TIMEOUT`, `MULE_RETRIES`, `OPENAI_API_KEY`) beat the local
+`MULE_MAX_STEPS`, `MULE_TIMEOUT`, `MULE_RETRIES`, `MULE_CONTEXT_BUDGET`, `OPENAI_API_KEY`) beat the local
 config beat the global config beat the built-in defaults. you can
 put `api_key` in the config, but an env var is safer than a key
 sitting in a file.
@@ -91,6 +99,10 @@ turns. slash commands:
 - `/cost` - show tokens and spend so far
 - `/undo` - restore the most recently changed file
 
+drop markdown files in `<root>/.mule/commands/` and they become
+custom slash commands: `review.md` becomes `/review`, and its
+content runs as the next task. `/help` lists them.
+
 a task on the command line runs first, then the loop takes over:
 
 ```bash
@@ -110,20 +122,50 @@ the session spend passes the budget (models without a pricing row
 never trip it). pricing lives in `cost.py` (dollars per 1m tokens, update
 as prices move); models not in the table show "unknown pricing".
 
+long runs don't blow up the context: past `--context-budget` chars of
+history, the oldest messages get squashed into a summary by one model
+call (system prompt and the last 10 messages stay intact). the summary
+call counts toward the cost totals like any other step.
+
+## plan mode, todos, and checkpoints
+
+`--plan` makes the model write its plan before touching anything. you
+approve it, reject it, or ask for one revision; only an approved plan
+reaches the tool loop.
+
+for multi-step work the model can keep a todo list with `todo_write`
+(`pending`/`in_progress`/`done`) and read it back with `todo_read`;
+the loop prints a compact `[2/5] current thing` line whenever it
+changes.
+
+`--checkpoint NAME` tars the project root into
+`~/.mule/checkpoints/` before a run (skips `.git`, `__pycache__`,
+and `.mule`), and `--restore NAME` unpacks one back over the
+project. cheap insurance before letting the agent loose.
+
+`--export PATH` writes the finished session to a readable markdown
+file: turns as `## user` / `## assistant`, tool calls as code
+blocks, cost at the bottom.
+
 ## how it works
 
 `agent.py` runs the loop: send messages, take the model's tool calls,
-run them, feed results back, repeat. `tools.py` has seven tools -
+run them, feed results back, repeat. it also handles plan approval,
+todo progress lines, context compaction, and running several tool
+calls from one turn in order. `tools.py` has ten tools -
 read_file, write_file, edit_file, list_dir, run_shell, fetch_url,
-web_search - all sandboxed to `--root` so the agent can't wander
-out of the project dir (fetch_url only does http/https).
+web_search, todo_write, todo_read, read_image - all sandboxed to
+`--root` so the agent can't wander out of the project dir (fetch_url
+only does http/https, read_image only loads png/jpg/gif/webp).
 `client.py` is the http client for /v1/chat/completions, with
 streaming support, token usage capture, and retries with
 exponential backoff on 429s and 5xxs. `cost.py` holds rough
 per-model pricing. `sessions.py` saves and resumes conversations
-as jsonl files under `~/.mule/sessions/`. `prompt.md` is the system
-prompt. `repl.py` runs the `--interactive` prompt loop and its
-slash commands.
+as jsonl files under `~/.mule/sessions/` and exports them to
+markdown. `checkpoints.py` tars and restores project snapshots.
+`prompt.md` is the system prompt. `repl.py` runs the
+`--interactive` prompt loop, its slash commands, and custom
+commands from `.mule/commands/`.
 
 ## tools
 
@@ -135,6 +177,9 @@ slash commands.
 - `fetch_url` - fetch a web page, html stripped to rough text
 - `web_search` - search the web via duckduckgo, returns titles,
   urls, and snippets
+- `todo_write` - replace the todo list (json list of {text, status})
+- `todo_read` - show the current todo list
+- `read_image` - load a png/jpg/gif/webp as a base64 data uri
 
 ## safety notes
 
