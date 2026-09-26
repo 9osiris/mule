@@ -47,6 +47,10 @@ def parse_args(argv=None):
                    default=_num(os.environ.get("MULE_TIMEOUT"),
                                 cfg.get("timeout"), 120, float),
                    help="api request timeout in seconds")
+    p.add_argument("--retries", type=int,
+                   default=_num(os.environ.get("MULE_RETRIES"),
+                                cfg.get("retries"), 3, int),
+                   help="retries on 429/5xx with exponential backoff")
     p.add_argument("--system-prompt", default=None)
     p.add_argument("--quiet", action="store_true", help="only print the final answer")
     p.add_argument("--no-stream", action="store_true",
@@ -90,7 +94,7 @@ def main(argv=None):
 
     tools = ToolSet(args.root, confirm=ask_cmd if args.ask else None)
     client = ChatClient(args.base_url, args.api_key, args.model,
-                        timeout=args.timeout)
+                        timeout=args.timeout, retries=args.retries)
     system = load_system_prompt(args.system_prompt)
 
     messages = None

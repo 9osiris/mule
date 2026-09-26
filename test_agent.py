@@ -560,6 +560,159 @@ check("--timeout parses",
 check("--max-steps still defaults to 25",
       parse_args(["task"]).max_steps == 25)
 
+# retry with backoff: fake server fails twice, then succeeds
+
+rcalls = {"n": 0}
+
+
+class RetryHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        rcalls["n"] += 1
+        if rcalls["n"] <= 2:
+            self.send_response(500 if rcalls["n"] == 1 else 429)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = json.dumps(
+            {"choices": [{"message": {"role": "assistant",
+                                      "content": "recovered"}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+rserver = HTTPServer(("127.0.0.1", 0), RetryHandler)
+threading.Thread(target=rserver.serve_forever, daemon=True).start()
+rclient = ChatClient("http://127.0.0.1:%d/v1" % rserver.server_port,
+                     "fake-key", "m", retries=3, backoff=0)
+rreply = rclient.chat([{"role": "user", "content": "hi"}])
+check("retry succeeded after 2 failures",
+      rreply.get("content") == "recovered" and rcalls["n"] == 3)
+rserver.shutdown()
+
+# always failing: clean error after retries exhausted
+
+fcalls = {"n": 0}
+
+
+class FailHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        fcalls["n"] += 1
+        self.send_response(503)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+fserver = HTTPServer(("127.0.0.1", 0), FailHandler)
+threading.Thread(target=fserver.serve_forever, daemon=True).start()
+fclient = ChatClient("http://127.0.0.1:%d/v1" % fserver.server_port,
+                     "fake-key", "m", retries=2, backoff=0)
+try:
+    fclient.chat([{"role": "user", "content": "hi"}])
+    check("exhausted retries raise", False)
+except RuntimeError as e:
+    check("exhausted retries raise",
+          "503" in str(e) and "3 attempt" in str(e))
+check("gave up after retries+1 attempts", fcalls["n"] == 3)
+fserver.shutdown()
+
+# 400 is not retryable: one attempt, immediate error
+
+bcalls = {"n": 0}
+
+
+class BadHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        bcalls["n"] += 1
+        self.send_response(400)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+bserver = HTTPServer(("127.0.0.1", 0), BadHandler)
+threading.Thread(target=bserver.serve_forever, daemon=True).start()
+bclient = ChatClient("http://127.0.0.1:%d/v1" % bserver.server_port,
+                     "fake-key", "m", retries=3, backoff=0)
+try:
+    bclient.chat([{"role": "user", "content": "hi"}])
+    check("400 raises", False)
+except RuntimeError:
+    check("400 raises", True)
+check("400 not retried", bcalls["n"] == 1)
+bserver.shutdown()
+
+# backoff waits 1x, 2x, 4x ... between attempts
+
+import client as client_mod
+
+
+class FakeTime:
+    def __init__(self):
+        self.sleeps = []
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+
+
+fake_time = FakeTime()
+real_time = client_mod.time
+client_mod.time = fake_time
+ecalls = {"n": 0}
+
+
+class ExpHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        ecalls["n"] += 1
+        if ecalls["n"] < 3:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = json.dumps(
+            {"choices": [{"message": {"role": "assistant",
+                                      "content": "ok"}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+eserver = HTTPServer(("127.0.0.1", 0), ExpHandler)
+threading.Thread(target=eserver.serve_forever, daemon=True).start()
+eclient = ChatClient("http://127.0.0.1:%d/v1" % eserver.server_port,
+                     "fake-key", "m", retries=3, backoff=2)
+eclient.chat([{"role": "user", "content": "hi"}])
+eserver.shutdown()
+client_mod.time = real_time
+check("backoff is exponential", fake_time.sleeps == [2, 4])
+
+check("--retries defaults to 3", parse_args(["task"]).retries == 3)
+check("--retries parses",
+      parse_args(["task", "--retries", "0"]).retries == 0)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

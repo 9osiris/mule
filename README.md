@@ -40,13 +40,14 @@ python main.py "summarize the repo layout" \
 - `--list-sessions` - list saved sessions and exit
 - `--ask` - ask for confirmation before each shell command
 - `--timeout SEC` - api request timeout (default: 120)
+- `--retries N` - retries on 429/5xx with exponential backoff (default: 3)
 
 ## config file
 
 `mule.json` in the current directory sets defaults, and
 `~/.config/mule/mule.json` sets global ones. the local file wins
 over the global one. recognized keys: `model`, `base_url`,
-`api_key`, `max_steps`, `timeout`, `root`.
+`api_key`, `max_steps`, `timeout`, `retries`, `root`.
 
 ```json
 {
@@ -58,7 +59,7 @@ over the global one. recognized keys: `model`, `base_url`,
 ```
 
 precedence: flags beat env vars (`MULE_MODEL`, `MULE_BASE_URL`,
-`MULE_MAX_STEPS`, `MULE_TIMEOUT`, `OPENAI_API_KEY`) beat the local
+`MULE_MAX_STEPS`, `MULE_TIMEOUT`, `MULE_RETRIES`, `OPENAI_API_KEY`) beat the local
 config beat the global config beat the built-in defaults. you can
 put `api_key` in the config, but an env var is safer than a key
 sitting in a file.
@@ -88,7 +89,8 @@ read_file, write_file, edit_file, list_dir, run_shell, fetch_url -
 all sandboxed to `--root` so the agent can't wander out of the project
 dir (fetch_url only does http/https).
 `client.py` is the http client for /v1/chat/completions, with
-streaming support and token usage capture. `cost.py` holds rough
+streaming support, token usage capture, and retries with
+exponential backoff on 429s and 5xxs. `cost.py` holds rough
 per-model pricing. `sessions.py` saves and resumes conversations
 as jsonl files under `~/.mule/sessions/`. `prompt.md` is the system
 prompt.

@@ -1,16 +1,35 @@
 import json
+import time
 import urllib.request
 import urllib.error
+
+RETRYABLE = (429, 500, 502, 503, 504)  # rate limit or server blew up
 
 
 class ChatClient:
     """talks to any openai-compatible /v1/chat/completions endpoint."""
 
-    def __init__(self, base_url, api_key, model, timeout=120):
+    def __init__(self, base_url, api_key, model, timeout=120,
+                 retries=3, backoff=1.0):
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
+        self.retries = retries
+        self.backoff = backoff
+
+    def _post(self, req):
+        # one post with retries on rate limits and server errors
+        for attempt in range(self.retries + 1):
+            try:
+                return urllib.request.urlopen(req, timeout=self.timeout)
+            except urllib.error.HTTPError as e:
+                last = attempt == self.retries
+                if e.code not in RETRYABLE or last:
+                    detail = e.read().decode(errors="replace")[:500]
+                    raise RuntimeError("api error %d after %d attempt(s): %s"
+                                       % (e.code, attempt + 1, detail))
+                time.sleep(self.backoff * (2 ** attempt))
 
     def chat(self, messages, tools=None):
         body = {
@@ -30,12 +49,11 @@ class ChatClient:
             },
             method="POST",
         )
+        resp = self._post(req)
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                payload = json.load(resp)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:500]
-            raise RuntimeError("api error %d: %s" % (e.code, detail))
+            payload = json.load(resp)
+        finally:
+            resp.close()
 
         msg = payload["choices"][0]["message"]
         out = {"role": "assistant"}
@@ -83,11 +101,7 @@ class ChatClient:
             },
             method="POST",
         )
-        try:
-            resp = urllib.request.urlopen(req, timeout=self.timeout)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode(errors="replace")[:500]
-            raise RuntimeError("api error %d: %s" % (e.code, detail))
+        resp = self._post(req)
 
         content_parts = []
         tool_calls = {}
