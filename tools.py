@@ -1,14 +1,18 @@
 import base64
 import datetime
 import difflib
+import fnmatch
 import html
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import urllib.parse
 import urllib.request
+
+from agent import run as _agent_run, last_answer as _agent_last
 
 MAX_READ = 100_000  # don't dump giant files into context
 MAX_OUTPUT = 20_000
@@ -54,6 +58,71 @@ def make_diff(old, new, path="file"):
     return "\n".join(lines)
 
 
+class JobStore:
+    # background shell jobs, each runs in its own thread
+    def __init__(self, root):
+        self.root = root
+        self.lock = threading.Lock()
+        self.jobs = {}
+        self.next_id = 1
+
+    def start(self, command, timeout=300):
+        with self.lock:
+            jid = self.next_id
+            self.next_id += 1
+            job = {"id": jid, "command": command, "done": False,
+                   "killed": False, "output": "", "returncode": None}
+            self.jobs[jid] = job
+        t = threading.Thread(target=self._run, args=(job, timeout),
+                             daemon=True)
+        t.start()
+        return jid
+
+    def _run(self, job, timeout):
+        try:
+            proc = subprocess.Popen(
+                job["command"], shell=True, cwd=self.root,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True)
+        except Exception as e:
+            job["output"] = "error: could not start: %s" % e
+            job["done"] = True
+            return
+        job["proc"] = proc
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+            job["returncode"] = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, _ = proc.communicate()
+            job["returncode"] = proc.returncode
+            out = (out or "") + "\n[job timed out after %ss]" % timeout
+        job["output"] = out or ""
+        job["done"] = True
+
+    def get(self, jid):
+        with self.lock:
+            return self.jobs.get(jid)
+
+    def all(self):
+        with self.lock:
+            return [self.jobs[k] for k in sorted(self.jobs)]
+
+    def kill(self, jid):
+        job = self.get(jid)
+        if job is None:
+            return None
+        proc = job.get("proc")
+        if proc and not job["done"]:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            job["killed"] = True
+            return True
+        return False
+
+
 class BackupStore:
     # copies of files before they get modified, newest last
     def __init__(self, backup_dir=None):
@@ -83,11 +152,19 @@ class BackupStore:
 
 
 class ToolSet:
-    def __init__(self, root, confirm=None):
+    def __init__(self, root, confirm=None, ask=None, make_chat=None,
+                 delegate_depth=0, max_delegates=3):
         self.root = os.path.abspath(root)
         # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
+        # ask(question, options) -> str, the human-in-the-loop for ask_user
+        self.ask = ask
+        # make_chat() -> chat_fn for delegate subagents, None disables it
+        self.make_chat = make_chat
+        self.delegate_depth = delegate_depth
+        self._delegate_sem = threading.Semaphore(max(1, max_delegates))
         self.backups = BackupStore()
+        self.jobs = JobStore(self.root)
         self.todos = []  # [{text, status}] the model manages itself
         self.tools = {
             "read_file": {
@@ -112,9 +189,41 @@ class ToolSet:
                 "run": self.list_dir,
             },
             "run_shell": {
-                "description": "run a shell command in the project root, returns output",
-                "parameters": {"command": "the command", "timeout": "seconds, default 30"},
+                "description": "run a shell command in the project root, returns output. "
+                               "pass background=true to get a job id back instead",
+                "parameters": {"command": "the command", "timeout": "seconds, default 30",
+                               "background": "true to run in the background"},
                 "run": self.run_shell,
+            },
+            "jobs": {
+                "description": "list background shell jobs with status and output preview",
+                "parameters": {},
+                "run": self.jobs_list,
+            },
+            "job_output": {
+                "description": "full output of a background job",
+                "parameters": {"id": "the job id"},
+                "run": self.job_output,
+            },
+            "job_kill": {
+                "description": "stop a running background job",
+                "parameters": {"id": "the job id"},
+                "run": self.job_kill,
+            },
+            "ask_user": {
+                "description": "ask the human a question with 2-4 options. "
+                               "only works in interactive or --ask mode.",
+                "parameters": {"question": "the question",
+                               "options": "json list of 2-4 option labels"},
+                "run": self.ask_user,
+            },
+            "delegate": {
+                "description": "hand a subtask to a subagent with its own history. "
+                               "it runs to completion and returns a summary. "
+                               "delegates cannot delegate further.",
+                "parameters": {"task": "what the subagent should do",
+                               "system": "optional extra instructions"},
+                "run": self.delegate,
             },
             "fetch_url": {
                 "description": "fetch a web page, returns the text with html stripped",
@@ -143,6 +252,14 @@ class ToolSet:
                                "can look at (png/jpg/gif/webp)",
                 "parameters": {"path": "relative path of the image"},
                 "run": self.read_image,
+            },
+            "grep": {
+                "description": "search file contents for a regex pattern, "
+                               "returns file:line matches",
+                "parameters": {"pattern": "regex to search for",
+                               "path": "where to search, default '.'",
+                               "glob": "filename filter like '*.py', default '*'"},
+                "run": self.grep,
             },
         }
 
@@ -203,7 +320,8 @@ class ToolSet:
         prompt = action
         diff = make_diff(old_text, new_text, path)
         if diff:
-            prompt += "\n" + diff
+            from ui import color_diff
+            prompt += "\n" + color_diff(diff)
         return self.confirm(prompt)
 
     def write_file(self, path, content=""):
@@ -260,9 +378,12 @@ class ToolSet:
                 lines.append("%s (%d bytes)" % (name, os.path.getsize(p)))
         return "\n".join(lines) or "(empty)"
 
-    def run_shell(self, command, timeout="30"):
+    def run_shell(self, command, timeout="30", background="false"):
         if self.confirm and not self.confirm(command):
             return "declined: the command was not run"
+        if str(background).lower() in ("true", "1", "yes"):
+            jid = self.jobs.start(command)
+            return "job started: %d (use job_output %d to read it)" % (jid, jid)
         try:
             timeout = float(timeout)
         except (TypeError, ValueError):
@@ -280,6 +401,93 @@ class ToolSet:
             out = out[:MAX_OUTPUT] + "\n...[truncated]"
         out = out.rstrip() or "(no output)"
         return "exit %d\n%s" % (proc.returncode, out)
+
+    def jobs_list(self):
+        # every background job, newest last, with an output preview
+        rows = self.jobs.all()
+        if not rows:
+            return "(no background jobs)"
+        lines = []
+        for j in rows:
+            status = "done (exit %s)" % j["returncode"] if j["done"] \
+                else "running"
+            if j["killed"]:
+                status += ", killed"
+            preview = (j["output"] or "").strip().split("\n")
+            preview = " | ".join(preview[:3])[:200]
+            lines.append("#%d [%s] %s%s" % (
+                j["id"], status, j["command"][:60],
+                (" -- " + preview) if preview else ""))
+        return "\n".join(lines)
+
+    def job_output(self, id=""):
+        # full output of one job, capped like everything else
+        try:
+            jid = int(id)
+        except (TypeError, ValueError):
+            return "error: bad job id: %s" % id
+        job = self.jobs.get(jid)
+        if job is None:
+            return "error: no such job: %s" % id
+        out = job["output"] or ("(still running)" if not job["done"]
+                                else "(no output)")
+        if len(out) > MAX_OUTPUT:
+            out = out[:MAX_OUTPUT] + "\n...[truncated]"
+        state = "done" if job["done"] else "running"
+        return "job #%d [%s]\n%s" % (jid, state, out)
+
+    def job_kill(self, id=""):
+        try:
+            jid = int(id)
+        except (TypeError, ValueError):
+            return "error: bad job id: %s" % id
+        job = self.jobs.get(jid)
+        if job is None:
+            return "error: no such job: %s" % id
+        if job["done"]:
+            return "job #%d already finished" % jid
+        self.jobs.kill(jid)
+        return "killed job #%d" % jid
+
+    def ask_user(self, question="", options="[]"):
+        # the model asks the human something mid-run
+        if not question:
+            return "error: empty question"
+        try:
+            opts = json.loads(options or "[]")
+        except json.JSONDecodeError:
+            return "error: options was not valid json"
+        if not isinstance(opts, list) or not 2 <= len(opts) <= 4:
+            return "error: give 2 to 4 options as a json list"
+        opts = [str(o) for o in opts]
+        if not self.ask:
+            return ("error: cannot ask the user in non-interactive mode, "
+                    "proceed with your best guess and say what you assumed")
+        try:
+            return self.ask(question, opts)
+        except Exception as e:
+            return "error: asking failed: %s" % e
+
+    def delegate(self, task="", system=""):
+        # farm a subtask out to a fresh agent loop with its own history
+        if not task:
+            return "error: empty task"
+        if self.delegate_depth >= 1:
+            return "error: delegates cannot spawn their own delegates"
+        if not self.make_chat:
+            return "error: delegation is not wired up in this run"
+        with self._delegate_sem:
+            sub = ToolSet(self.root, make_chat=self.make_chat,
+                          delegate_depth=self.delegate_depth + 1)
+            try:
+                messages = _agent_run(task, self.make_chat(), sub,
+                                      system_prompt=(system or "").strip()
+                                      or None,
+                                      max_steps=15)
+            except Exception as e:
+                return "error: delegate failed: %s" % e
+            answer = _agent_last(messages)
+            return answer or "(the delegate said nothing)"
 
     def todo_write(self, todos="[]"):
         # the model rewrites its whole todo list each time it changes
@@ -393,3 +601,34 @@ class ToolSet:
             if snippet:
                 lines.append("   %s" % snippet)
         return "\n".join(lines)
+
+    def grep(self, pattern, path=".", glob="*"):
+        # walk the tree, print file:line for every line matching
+        # the regex. skips binaries, caps at 100 hits.
+        try:
+            rx = re.compile(pattern or "")
+        except re.error as e:
+            return "error: bad pattern: %s" % e
+        base = self._resolve(path)
+        if not os.path.isdir(base):
+            return "error: not a directory: %s" % path
+        hits = []
+        for dirpath, _, files in os.walk(base):
+            for name in sorted(files):
+                if not fnmatch.fnmatch(name, glob or "*"):
+                    continue
+                full = os.path.join(dirpath, name)
+                rel = os.path.relpath(full, self.root)
+                try:
+                    with open(full, "r", errors="replace") as f:
+                        for i, line in enumerate(f, 1):
+                            if "\x00" in line:
+                                break  # binary, skip the file
+                            if rx.search(line):
+                                hits.append("%s:%d: %s"
+                                            % (rel, i, line.rstrip()))
+                            if len(hits) >= 100:
+                                return "\n".join(hits) + "\n...[truncated]"
+                except OSError:
+                    continue
+        return "\n".join(hits) or "no matches for %r" % pattern
