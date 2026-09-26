@@ -1,8 +1,3 @@
-# mule branding
-
-the look. mule should be recognizable in a terminal the way claude
-code and gemini cli are: one mark, one color, one motion.
-
 ## the mark
 
 ```
