@@ -49,6 +49,7 @@ def init_color(no_color):
     _enabled = not (no_color or os.environ.get("NO_COLOR"))
     if _enabled and not _windows_ansi():
         _enabled = False
+    refresh_glyphs()
 
 
 def _wrap(code, text):
@@ -84,6 +85,51 @@ def brand(text):
 
 def cyan(text):
     return _wrap("36", text)
+
+
+# glyphs: unicode when the terminal can show it, plain ascii on
+# legacy consoles (windows cmd) where fancy chars print as boxes.
+def _supports_unicode():
+    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        "\u23fa\u23bf\u276f\u2500\u00b7\u25f7".encode(enc)
+        return True
+    except Exception:
+        return False
+
+
+UNICODE_OK = _supports_unicode()
+
+
+def _glyphs():
+    if UNICODE_OK:
+        return {"call": "\u23fa", "result": "\u23bf",
+                "rule": "\u2500", "thin": "\u2504",
+                "prompt": "\u276f", "dot": "\u00b7",
+                "frames": ["\u25f7", "\u25f6", "\u25f5", "\u25f4"],
+                "tl": "\u256d", "tr": "\u256e",
+                "bl": "\u2570", "br": "\u256f",
+                "v": "\u2502"}
+    return {"call": "*", "result": "|",
+            "rule": "-", "thin": "-",
+            "prompt": ">", "dot": "|",
+            "frames": ["|", "/", "-", "\\"],
+            "tl": "+", "tr": "+",
+            "bl": "+", "br": "+",
+            "v": "|"}
+
+
+G = _glyphs()
+
+
+def refresh_glyphs(force=None):
+    # re-detect, in case stdout changed since import. updates the
+    # dict in place so existing imports keep working. force=True
+    # or False pins the set, which is what tests use.
+    global UNICODE_OK
+    UNICODE_OK = _supports_unicode() if force is None else force
+    G.clear()
+    G.update(_glyphs())
 
 
 MULE_HEAD = r"""   /\ /\
@@ -154,7 +200,7 @@ def args_summary(args):
 def tool_call_line(name, summary=""):
     # one dim line per call: the amber dot, the name, the args.
     # no panel per call, the transcript stays scannable.
-    head = "%s %s" % (brand("\u23fa"), name)
+    head = "%s %s" % (brand(G["call"]), name)
     if summary:
         one = " ".join(str(summary).split())
         if len(one) > 100:
@@ -170,7 +216,7 @@ def tool_result_line(text):
     lines = text.splitlines()
     first = lines[0][:120] if lines else "(empty)"
     extra = max(0, len(lines) - 1)
-    s = "\u23bf " + first
+    s = G["result"] + " " + first
     if extra:
         s += " ... +%d lines" % extra
     if text.startswith("error:"):
@@ -185,28 +231,31 @@ def tool_panel(name, summary):
     rows = [r for r in str(summary or "").splitlines()]
     inner = max([len(name)] + [len(r) for r in rows] + [0])
     w = min(70, max(inner + 4, len(name) + 6, 20))
-    top = "\u256d\u2500 " + name + " " + "\u2500" * (w - 5 - len(name)) + "\u256e"
+    top = G["tl"] + G["rule"] + " " + name + " " \
+        + G["rule"] * (w - 5 - len(name)) + G["tr"]
     out = [brand(top[:3]) + cyan(name)
            + brand(top[3 + len(name):])]
     for r in rows:
         cell = r[:w - 4] + " " * (w - 4 - len(r[:w - 4]))
-        out.append(brand("\u2502 ") + cell + brand(" \u2502"))
-    out.append(brand("\u2570" + "\u2500" * (w - 2) + "\u256f"))
+        out.append(brand(G["v"] + " ") + cell + brand(" " + G["v"]))
+    out.append(brand(G["bl"] + G["rule"] * (w - 2) + G["br"]))
     return "\n".join(out)
 
 
 def run_banner(version, model, root):
     # non-interactive startup: the mark, then version/model/root
+    d = G["dot"]
     return "%s\n  %s" % (
         brand(MULE_HEAD),
-        dim("mule %s \u00b7 %s \u00b7 %s" % (version, model, root)))
+        dim("mule %s %s %s %s %s" % (version, d, model, d, root)))
 
 
 def step_line(step, tokens_in, tokens_out, cost):
     # one dim line per step: number, tokens, cost
-    return dim("  step %d \u00b7 %s in / %s out \u00b7 %s" % (
-        step, "{:,}".format(tokens_in),
-        "{:,}".format(tokens_out), cost))
+    d = G["dot"]
+    return dim("  step %d %s %s in / %s out %s %s" % (
+        step, d, "{:,}".format(tokens_in),
+        "{:,}".format(tokens_out), d, cost))
 
 
 def _cell(text, width):
@@ -223,8 +272,8 @@ def welcome_screen(version, model, root, recent, tips):
     w, lw, rw, gap = 76, 32, 38, 4
     title = " mule v%s " % version
     fill = w - len(title)
-    lines = [brand("\u2504" * (fill // 2) + title
-                   + "\u2504" * (fill - fill // 2))]
+    lines = [brand(G["thin"] * (fill // 2) + title
+                   + G["thin"] * (fill - fill // 2))]
     head = MULE_HEAD.splitlines()
     left = (["", "welcome back.", ""]
             + head
@@ -243,18 +292,15 @@ def welcome_screen(version, model, root, recent, tips):
                                                     "tips"):
             r = brand(r)
         lines.append("  " + l + " " * gap + r)
-    lines.append(brand("\u2504" * w))
+    lines.append(brand(G["thin"] * w))
     return "\n".join(lines)
 
 
 def status_footer(version, model, tokens_in, tokens_out, cost):
     # the end-of-run footer: model, tokens, cost under an amber rule
     return "%s\nmule %s | model %s | %s in / %s out | %s" % (
-        brand("\u2500" * 40), version, model,
+        brand(G["rule"] * 40), version, model,
         "{:,}".format(tokens_in), "{:,}".format(tokens_out), cost)
-
-
-SPINNER_FRAMES = ["\u25f7", "\u25f6", "\u25f5", "\u25f4"]
 
 
 class Spinner:
@@ -269,10 +315,14 @@ class Spinner:
         return (_enabled and hasattr(sys.stdout, "isatty")
                 and sys.stdout.isatty())
 
+    def _frame(self):
+        frames = G["frames"]
+        return frames[self._i % len(frames)]
+
     def tick(self):
         if not self._ok():
             return
-        frame = SPINNER_FRAMES[self._i % len(SPINNER_FRAMES)]
+        frame = self._frame()
         sys.stdout.write("\r%s %s" % (brand(frame), self.label))
         sys.stdout.flush()
         self._i += 1
@@ -310,8 +360,9 @@ class ThreadSpinner:
         if self._stop.wait(self.delay):
             return
         i = 0
+        frames = G["frames"]
         while not self._stop.is_set():
-            frame = SPINNER_FRAMES[i % len(SPINNER_FRAMES)]
+            frame = frames[i % len(frames)]
             sys.stdout.write("\r%s %s" % (brand(frame), self.label))
             sys.stdout.flush()
             i += 1
@@ -357,7 +408,7 @@ class Renderer:
         print(tool_result_line(text))
 
     def rule(self, width=40):
-        print(brand("\u2500" * width))
+        print(brand(G["rule"] * width))
 
     def welcome(self, version, model, root, recent, tips):
         print(welcome_screen(version, model, root, recent, tips))

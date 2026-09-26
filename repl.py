@@ -5,7 +5,7 @@ import re
 import subprocess
 
 from cost import cost_for, fmt_cost
-from ui import dim
+from ui import dim, G
 
 HELP_TEXT = """slash commands:
   /help        show this help
@@ -175,9 +175,13 @@ def handle_slash(line, ctx):
     return None
 
 
-def repl_loop(read_line, write, on_task, on_slash, prompt="\u276f ",
+def repl_loop(read_line, write, on_task, on_slash, prompt=None,
               root=None):
     # read_line(prompt) raises EOFError/KeyboardInterrupt to leave.
+    # the prompt glyph follows the terminal: pretty unicode when
+    # it can render, plain > on legacy consoles.
+    if prompt is None:
+        prompt = G["prompt"] + " "
     # a line starting with ``` opens a multiline block: everything
     # until the closing ``` becomes one task.
     # a line starting with ! runs a shell command directly.

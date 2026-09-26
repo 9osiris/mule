@@ -3359,13 +3359,13 @@ check("/bug defaults the title", "title=bug%20report" in _bug_out2[0])
 # branding: banner, panels, footer, spinner
 
 import ui as ui_mod
-from ui import tool_panel, status_footer, Spinner, brand, \
-    SPINNER_FRAMES
+from ui import tool_panel, status_footer, Spinner, brand
 
 check("run banner carries the mule head",
       "\\__/" in ui_mod.run_banner("0.9.0", "m", "/r"))
-check("spinner frames are four distinct custom frames",
-      len(SPINNER_FRAMES) == 4 and len(set(SPINNER_FRAMES)) == 4)
+ui_mod.refresh_glyphs(force=True)
+check("unicode spinner frames are four distinct frames",
+      len(ui_mod.G["frames"]) == 4 and len(set(ui_mod.G["frames"])) == 4)
 
 _old_no_color = os.environ.pop("NO_COLOR", None)
 ui_mod.init_color(True)
@@ -3650,6 +3650,129 @@ if _ui_mod2._RICH:
     check("rich renderer streams markdown", _rr.name == "rich")
 else:
     check("rich renderer skipped (not installed)", True)
+
+# ascii fallback: legacy consoles get plain glyphs, no boxes
+
+import re as _re
+
+_ansi_re = _re.compile(r"\033\[[0-9;]*m")
+
+
+def _strip_ansi(s):
+    return _ansi_re.sub("", s)
+
+
+_saved_uni = ui_mod.UNICODE_OK
+ui_mod.refresh_glyphs(force=False)
+check("ascii set swaps the prompt glyph",
+      ui_mod.G["prompt"] == ">" and ui_mod.G["call"] == "*"
+      and ui_mod.G["result"] == "|")
+check("ascii spinner frames are four distinct ascii frames",
+      len(set(ui_mod.G["frames"])) == 4
+      and all(len(f) == 1 and ord(f) < 128
+              for f in ui_mod.G["frames"]))
+_ascii_call = _strip_ansi(tool_call_line("edit_file", "path=x"))
+check("ascii fallback: tool call uses *",
+      _ascii_call.startswith("* edit_file")
+      and "\u23fa" not in _ascii_call)
+_ascii_res = _strip_ansi(tool_result_line("a\nb"))
+check("ascii fallback: result nests with |",
+      _ascii_res.startswith("| a") and "\u23bf" not in _ascii_res)
+_ascii_rule = _strip_ansi(ui_mod.welcome_screen(
+    "0.9.0", "m", "/r", [], []).splitlines()[0])
+check("ascii fallback: welcome rules are dashes",
+      "\u2504" not in _ascii_rule
+      and _ascii_rule.startswith("---")
+      and _ascii_rule.endswith("---"))
+_ascii_panel = _strip_ansi(tool_panel("n", "s"))
+check("ascii fallback: panels use + and -",
+      "\u256d" not in _ascii_panel and _ascii_panel.startswith("+"))
+_seen_prompts = []
+
+
+def _cap_prompt(p):
+    _seen_prompts.append(p)
+    raise EOFError
+
+
+repl_loop(_cap_prompt, lambda s: None, lambda t: None, lambda l: None)
+check("repl prompt follows the terminal glyph set",
+      _seen_prompts and _seen_prompts[0]
+      == ui_mod.G["prompt"] + " ")
+ui_mod.refresh_glyphs(force=_saved_uni)
+check("glyph set restores after forcing ascii",
+      (_strip_ansi(tool_call_line("list_dir", "")).startswith("* ")
+       if not _saved_uni
+       else "\u23fa" in tool_call_line("list_dir", "")))
+
+# streamed flag: callers must not print an answer that already
+# rendered live
+
+import types as _types
+import main as _main_mod
+
+_orig_get_renderer = _main_mod.get_renderer
+
+
+def _mk_args(**kw):
+    d = dict(no_stream=False, print_mode=False, quiet=False,
+             json=False, stop="", model="m", fallback_model=None)
+    d.update(kw)
+    return _types.SimpleNamespace(**d)
+
+
+class _PlainClient:
+    def __init__(self):
+        self.stream_used = False
+
+    def chat(self, messages, tools, stop=None):
+        return {"content": "hi", "tool_calls": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        self.stream_used = True
+        raise AssertionError("plain path must not stream")
+
+
+_main_mod.get_renderer = lambda: ui_mod.PlainRenderer()
+_cf_plain = _main_mod.make_chat_fn(_mk_args(), _PlainClient())
+_rp = _cf_plain([], [])
+check("plain path uses chat(), never streams, flag stays false",
+      _rp["content"] == "hi" and _cf_plain.streamed is False)
+
+
+class _StubRich:
+    name = "rich"
+
+    def __init__(self):
+        self.tokens = []
+
+    def stream(self):
+        return self
+
+    def feed(self, t):
+        self.tokens.append(t)
+
+    def finish(self):
+        pass
+
+
+class _StreamClient:
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        for t in ["a", "b"]:
+            on_token(t)
+        return {"content": "ab", "tool_calls": [],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+_stub = _StubRich()
+_main_mod.get_renderer = lambda: _stub
+_cf_rich = _main_mod.make_chat_fn(_mk_args(), _StreamClient())
+_rr = _cf_rich([], [])
+check("rich path streams tokens live and sets the flag",
+      _stub.tokens == ["a", "b"] and _cf_rich.streamed is True
+      and _rr["content"] == "ab")
+_main_mod.get_renderer = _orig_get_renderer
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

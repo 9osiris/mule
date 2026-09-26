@@ -407,11 +407,16 @@ script against them: `mule --print "task" || echo "failed: $?"`.
 
 mule has a face: a geometric mule head in bold amber opens every
 run, with the version, model, and project root on one line under
-it. tool calls render as compact transcript lines (an amber dot,
+it. tool calls render as compact transcript lines (an amber glyph,
 the name, the args) with results nested underneath, a delayed
 spinner ticks while the model thinks, and a footer closes the run
 with the model, token counts, and cost. replies render as
-markdown. full spec in `BRANDING.md`.
+markdown, printed once: never streamed raw and then repeated.
+full spec in `BRANDING.md`.
+
+on terminals that render unicode you get `⏺ ⎿ ❯ ─ ◷`; on legacy
+windows consoles, where those show up as boxes, mule falls back
+to plain ascii (`* | > -`) automatically. colors work in both.
 
 install `rich` for the full treatment: syntax-highlighted code
 blocks and live markdown streaming as tokens arrive.
@@ -420,10 +425,11 @@ blocks and live markdown streaming as tokens arrive.
 pip install rich        # or: pip install mule[rich]
 ```
 
-without it, everything still works on plain stdlib: simple ansi
-styling, raw token streaming, same transcript. `--no-color` (or
-the `NO_COLOR` env var) turns all of it off; `--print`, `--json`,
-and `--quiet` never show it in the first place.
+without it, everything still works on plain stdlib: a spinner
+while the model thinks, then the reply rendered once, same
+transcript. `--no-color` (or the `NO_COLOR` env var) turns all of
+it off; `--print`, `--json`, and `--quiet` never show it in the
+first place.
 
 ## tests
 

@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 
 from agent import run, last_answer, load_system_prompt, plan_and_approve, \
     _clean_reply
@@ -543,60 +544,60 @@ def make_chat_fn(args, client):
                 return fn(messages, tools, **kw)
             raise
 
+    def _wait_with_spinner(fn):
+        # run fn on a thread while a delayed spinner runs: nothing
+        # prints until the reply is done, then the caller prints
+        # it once. silent unless stdout is a real terminal.
+        box = {}
+
+        def _call():
+            try:
+                box["reply"] = fn()
+            except Exception as e:
+                box["error"] = e
+
+        t = threading.Thread(target=_call, daemon=True)
+        spin = ThreadSpinner("thinking")
+        t.start()
+        spin.start()
+        t.join()
+        spin.stop()
+        if "error" in box:
+            raise box["error"]
+        return box["reply"]
+
     def chat_fn(messages, tools):
         stop = args.stop.split(",") if args.stop else None
-        # stream tokens live unless --no-stream was passed.
-        # --print stays silent, it only wants the final answer.
-        if args.no_stream or getattr(args, "print_mode", False):
-            if getattr(args, "print_mode", False) or args.quiet or args.json:
+        # streamed is True only when the reply was already shown
+        # live on the terminal. callers must not print it again.
+        chat_fn.streamed = False
+        silent = (getattr(args, "print_mode", False)
+                  or args.quiet or args.json)
+        if args.no_stream or silent:
+            if silent:
                 return _once(client.chat, messages, tools, stop=stop)
-            # waiting on the model: spinner on its own thread, first
-            # frame after a short delay so fast replies never
-            # flicker. silent unless stdout is a real terminal.
-            import threading
-            box = {}
-
-            def _call():
-                try:
-                    box["reply"] = _once(client.chat, messages, tools,
-                                         stop=stop)
-                except Exception as e:
-                    box["error"] = e
-
-            t = threading.Thread(target=_call, daemon=True)
-            spin = ThreadSpinner("thinking")
-            t.start()
-            spin.start()
-            t.join()
-            spin.stop()
-            if "error" in box:
-                raise box["error"]
-            return box["reply"]
-        # streaming: spinner until the first token lands, then the
-        # reply renders live. markdown + syntax highlighting when
-        # rich is installed, raw tokens otherwise.
+            return _wait_with_spinner(
+                lambda: _once(client.chat, messages, tools, stop=stop))
         renderer = get_renderer()
-        live_ok = renderer.name == "rich"
+        if renderer.name != "rich":
+            # plain terminal: spinner until the reply lands, then
+            # the caller prints it rendered once. no raw markdown
+            # flash on screen, no double print.
+            return _wait_with_spinner(
+                lambda: _once(client.chat, messages, tools, stop=stop))
+        # rich: the reply renders live as markdown in place. the
+        # final frame stays in the scrollback, so the caller must
+        # not print the answer again.
         spin = ThreadSpinner("thinking")
         spin.start()
         stream = None
-        raw = False
 
         def on_token(t):
-            nonlocal stream, raw
-            if args.quiet or args.json:
-                return
-            if stream is None and not raw:
+            nonlocal stream
+            if stream is None:
                 spin.stop()
-                if live_ok:
-                    stream = renderer.stream()
-                else:
-                    raw = True
-            if stream is not None:
-                stream.feed(t)
-            else:
-                sys.stdout.write(t)
-                sys.stdout.flush()
+                stream = renderer.stream()
+            stream.feed(t)
 
         try:
             reply = _once(client.chat_stream, messages, tools,
@@ -605,11 +606,10 @@ def make_chat_fn(args, client):
             spin.stop()
             if stream is not None:
                 stream.finish()
-            elif raw:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+        chat_fn.streamed = True
         return reply
 
+    chat_fn.streamed = False
     chat_fn.model_box = model_box
 
     def set_model(name):
@@ -824,6 +824,9 @@ def run_interactive(args, tools, system, messages, task,
         answer = last_answer(box["messages"])
         if getattr(args, "print_mode", False) or args.quiet or args.json:
             print(answer)
+        elif chat_fn.streamed:
+            # the reply already rendered live; leave a blank line
+            print()
         else:
             renderer.rule()
             renderer.print_markdown(answer)
@@ -1184,7 +1187,8 @@ def _run(args):
                                              totals["out"]))))
     if args.quiet:
         print(last_answer(messages))
-    else:
+    elif not chat_fn.streamed:
+        # already shown live when streamed; never print twice
         get_renderer().print_markdown(last_answer(messages))
     return exit_code
 

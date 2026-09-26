@@ -1,3 +1,8 @@
+# mule branding
+
+the look. mule should be recognizable in a terminal the way claude
+code and gemini cli are: one mark, one color, one motion.
+
 ## the mark
 
 ```
@@ -26,21 +31,32 @@ one brand color, the rest are semantics:
 
 ## motion
 
-the spinner frames are clock faces: `◷ ◶ ◵ ◴`. it ticks while
-waiting on a non-streamed model response, labeled `thinking`.
-one line, carriage-return redraw, cleared when the reply lands.
+the spinner ticks while waiting on the model: first frame after a
+short delay so fast replies never flicker, one line, labeled
+`thinking`, carriage-return redraw, cleared when the reply lands.
+the frames are clock faces (`◷ ◶ ◵ ◴`) on terminals that render
+unicode, plain `| / - \` on legacy consoles.
 
-## tool-call panels
+## tool-call transcript
 
-tool calls render as bordered panels, not `$ name args` lines:
+tool calls render as compact transcript lines, not bordered
+panels: one amber line per call, results nested underneath.
 
 ```
-┌─ run_shell
-│ command=echo hi
-└─
+⏺ run_shell command=echo hi
+⎿ hi
 ```
 
-panel name in cyan, frame in brand amber.
+errors print red so failures jump out. long output is trimmed to
+the first line plus a `+N lines` count.
+
+## glyph fallback
+
+mule detects what the terminal can render. modern terminals get
+unicode glyphs (`⏺ ⎿ ❯ ─ ◷`); legacy windows consoles, where
+those print as boxes, get plain ascii instead (`* | > -`, the
+classic `|/-\` spinner). colors still work in both. `--no-color`
+(or the `NO_COLOR` env var) turns all styling off.
 
 ## status footer
 
