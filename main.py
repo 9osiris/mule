@@ -117,8 +117,48 @@ def run_subcommand(name, rest):
         for path in created:
             print("created %s" % path)
         return 0
+    if name == "config":
+        return cmd_config(rest)
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
+
+
+def cmd_config(rest):
+    # mule config [--global] get/set/unset/list
+    from config import config_get, config_set, config_unset, config_list
+    global_ = "--global" in rest
+    args = [a for a in rest if a != "--global"]
+    if not args or args[0] not in ("get", "set", "unset", "list"):
+        print("usage: mule config [--global] get KEY | set KEY VALUE "
+              "| unset KEY | list", file=sys.stderr)
+        return 2
+    action = args[0]
+    try:
+        if action == "list":
+            data = config_list(global_)
+            for k in sorted(data):
+                print("%s=%s" % (k, json.dumps(data[k])))
+        elif action == "get":
+            if len(args) < 2:
+                print("usage: mule config get KEY", file=sys.stderr)
+                return 2
+            print(json.dumps(config_get(args[1], global_)))
+        elif action == "set":
+            if len(args) < 3:
+                print("usage: mule config set KEY VALUE", file=sys.stderr)
+                return 2
+            value = config_set(args[1], " ".join(args[2:]), global_)
+            print("%s=%s" % (args[1], json.dumps(value)))
+        elif action == "unset":
+            if len(args) < 2:
+                print("usage: mule config unset KEY", file=sys.stderr)
+                return 2
+            config_unset(args[1], global_)
+            print("unset %s" % args[1])
+    except KeyError as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 1
+    return 0
 
 
 def ask_cmd(command):

@@ -1392,6 +1392,55 @@ except FileExistsError:
 created2 = init_project(initroot, force=True)
 check("init --force overwrites", len(created2) == 3)
 
+# mule config from the cli
+
+import config as config_mod
+
+_cfg_home = tempfile.mkdtemp()
+_orig_home = config_mod.HOME_CONFIG
+_orig_local = config_mod.LOCAL_CONFIG
+config_mod.HOME_CONFIG = os.path.join(_cfg_home, "mule.json")
+config_mod.LOCAL_CONFIG = os.path.join(_cfg_home, "local-mule.json")
+
+check("config set stores a string",
+      config_mod.config_set("model", "gpt-4o-mini") == "gpt-4o-mini")
+check("config set parses numbers",
+      config_mod.config_set("max_steps", "40") == 40)
+check("config get reads it back",
+      config_mod.config_get("model") == "gpt-4o-mini")
+check("config get missing key is none",
+      config_mod.config_get("api_key") is None)
+config_mod.config_unset("model")
+check("config unset removes the key",
+      config_mod.config_get("model") is None)
+check("config list shows set keys",
+      config_mod.config_list().get("max_steps") == 40)
+try:
+    config_mod.config_set("nope", "x")
+    check("config rejects unknown keys", False)
+except KeyError:
+    check("config rejects unknown keys", True)
+
+check("config file is valid json",
+      json.load(open(config_mod.LOCAL_CONFIG))["max_steps"] == 40)
+
+from main import cmd_config
+check("cli config set works",
+      cmd_config(["set", "model", "gpt-4o"]) == 0)
+check("cli config get works",
+      cmd_config(["get", "model"]) == 0)
+check("cli config --global set works",
+      cmd_config(["--global", "set", "model", "gpt-4o-mini"]) == 0)
+check("cli config --global get works",
+      cmd_config(["--global", "get", "model"]) == 0)
+check("cli config bad action errors",
+      cmd_config(["frobnicate"]) == 2)
+check("cli config unknown key errors",
+      cmd_config(["set", "nope", "x"]) == 1)
+
+config_mod.HOME_CONFIG = _orig_home
+config_mod.LOCAL_CONFIG = _orig_local
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
