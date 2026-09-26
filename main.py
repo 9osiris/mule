@@ -20,6 +20,8 @@ def parse_args(argv=None):
     p.add_argument("--max-steps", type=int, default=25)
     p.add_argument("--system-prompt", default=None)
     p.add_argument("--quiet", action="store_true", help="only print the final answer")
+    p.add_argument("--no-stream", action="store_true",
+                   help="wait for the full response instead of streaming")
     return p.parse_args(argv)
 
 
@@ -40,6 +42,23 @@ def main(argv=None):
     client = ChatClient(args.base_url, args.api_key, args.model)
     system = load_system_prompt(args.system_prompt)
 
+    def chat_fn(messages, tools):
+        # stream tokens live unless --no-stream was passed
+        if args.no_stream:
+            return client.chat(messages, tools)
+        printed = []
+
+        def on_token(t):
+            if args.quiet:
+                return
+            print(t, end="", flush=True)
+            printed.append(t)
+
+        reply = client.chat_stream(messages, tools, on_token=on_token)
+        if printed and not args.quiet:
+            print()
+        return reply
+
     def show(step, calls):
         if args.quiet:
             return
@@ -49,7 +68,7 @@ def main(argv=None):
             print("$ %s %s" % (c["function"]["name"], summary))
 
     try:
-        messages = run(task, client.chat, tools,
+        messages = run(task, chat_fn, tools,
                        system_prompt=system,
                        max_steps=args.max_steps,
                        on_step=show)
