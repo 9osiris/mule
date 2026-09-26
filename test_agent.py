@@ -140,7 +140,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 24)
+      and len(seen["bodies"][0]["tools"]) == 25)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -2410,6 +2410,48 @@ check("git_status errors outside a repo",
       _nogit_tools.call("git_status", {}).startswith("error:"))
 check("git_log errors outside a repo",
       _nogit_tools.call("git_log", {}).startswith("error:"))
+
+
+class _PostHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        resp = b'{"echo": ' + body + b'}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+
+    def log_message(self, *a):
+        pass
+
+
+_post_server = HTTPServer(("127.0.0.1", 0), _PostHandler)
+threading.Thread(target=_post_server.serve_forever, daemon=True).start()
+_post_url = "http://127.0.0.1:%d/hook" % _post_server.server_port
+
+_hp_tools = ToolSet(tempfile.mkdtemp())
+check("http_post is gated behind --ask mode",
+      _hp_tools.call("http_post", {"url": _post_url, "body": '{"a": 1}'})
+      == "error: http_post needs --ask mode, the user must confirm every "
+         "request")
+_hp_ask = ToolSet(tempfile.mkdtemp(), confirm=lambda p: True)
+_hp_out = _hp_ask.call("http_post", {"url": _post_url,
+                                     "body": '{"a": 1}'})
+check("http_post sends the json body",
+      "status 200" in _hp_out and '"a": 1' in _hp_out)
+_hp_no = ToolSet(tempfile.mkdtemp(), confirm=lambda p: False)
+check("http_post honors a declined confirmation",
+      _hp_no.call("http_post", {"url": _post_url, "body": "{}"})
+      .startswith("declined:"))
+check("http_post rejects non-http urls",
+      _hp_ask.call("http_post", {"url": "ftp://x", "body": "{}"})
+      .startswith("error: only http"))
+check("http_post rejects bad json bodies",
+      _hp_ask.call("http_post", {"url": _post_url, "body": "nope"})
+      .startswith("error: body must be a json"))
+_post_server.shutdown()
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

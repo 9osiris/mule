@@ -306,6 +306,13 @@ class ToolSet:
                 "parameters": {"count": "how many, default 10"},
                 "run": self.git_log,
             },
+            "http_post": {
+                "description": "post json to a url, returns the response. "
+                               "only works in --ask mode",
+                "parameters": {"url": "http or https url",
+                               "body": "json string to post"},
+                "run": self.http_post,
+            },
         }
 
     def schemas(self):
@@ -821,3 +828,33 @@ class ToolSet:
         except (TypeError, ValueError):
             n = 10
         return self._git("log", "--oneline", "-n", str(n))
+
+    def http_post(self, url="", body="{}"):
+        # post json somewhere. sending data out is sensitive, so this
+        # only runs in --ask mode after an explicit confirmation.
+        if not self.confirm:
+            return ("error: http_post needs --ask mode, the user must "
+                    "confirm every request")
+        scheme = urllib.parse.urlparse(url or "").scheme
+        if scheme not in ("http", "https"):
+            return "error: only http and https urls, got: %s" % scheme
+        try:
+            payload = json.loads(body or "{}")
+        except ValueError:
+            return "error: body must be a json string"
+        if not self.confirm("http_post %s with body: %s"
+                            % (url, json.dumps(payload)[:200])):
+            return "declined: the request was not sent"
+        try:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode(),
+                headers={"User-Agent": "mule/1.0",
+                         "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read(MAX_OUTPUT + 1)
+        except Exception as e:
+            return "error: post failed: %s" % e
+        text = data.decode("utf-8", errors="replace")
+        if len(data) > MAX_OUTPUT:
+            text = text[:MAX_OUTPUT] + "\n...[truncated]"
+        return "status %d\n%s" % (resp.status, text or "(empty)")
