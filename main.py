@@ -51,6 +51,8 @@ def parse_args(argv=None):
                    default=_num(os.environ.get("MULE_RETRIES"),
                                 cfg.get("retries"), 3, int),
                    help="retries on 429/5xx with exponential backoff")
+    p.add_argument("--max-cost", type=float, default=None, metavar="DOLLARS",
+                   help="stop the agent when session cost exceeds this")
     p.add_argument("--system-prompt", default=None)
     p.add_argument("--quiet", action="store_true", help="only print the final answer")
     p.add_argument("--no-stream", action="store_true",
@@ -133,15 +135,21 @@ def main(argv=None):
     totals = {"in": 0, "out": 0}
 
     def track(step, usage):
-        if not usage or args.quiet:
-            return
-        pin = usage.get("prompt_tokens", 0)
-        pout = usage.get("completion_tokens", 0)
-        totals["in"] += pin
-        totals["out"] += pout
-        print("  [step %d: %s in / %s out, %s]" % (
-            step, "{:,}".format(pin), "{:,}".format(pout),
-            fmt_cost(cost_for(args.model, pin, pout))))
+        # returns True when the cost budget is blown, stopping the loop
+        if usage:
+            pin = usage.get("prompt_tokens", 0)
+            pout = usage.get("completion_tokens", 0)
+            totals["in"] += pin
+            totals["out"] += pout
+            if not args.quiet:
+                print("  [step %d: %s in / %s out, %s]" % (
+                    step, "{:,}".format(pin), "{:,}".format(pout),
+                    fmt_cost(cost_for(args.model, pin, pout))))
+        if args.max_cost is not None:
+            spent = cost_for(args.model, totals["in"], totals["out"])
+            if spent is not None and spent > args.max_cost:
+                return True
+        return False
 
     try:
         messages = run(task, chat_fn, tools,

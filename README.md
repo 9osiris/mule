@@ -41,6 +41,7 @@ python main.py "summarize the repo layout" \
 - `--ask` - ask for confirmation before each shell command
 - `--timeout SEC` - api request timeout (default: 120)
 - `--retries N` - retries on 429/5xx with exponential backoff (default: 3)
+- `--max-cost DOLLARS` - stop the agent when session cost exceeds this
 
 ## config file
 
@@ -78,7 +79,9 @@ python main.py --resume parser-work "now fix the failing test"
 ## cost tracking
 
 each step prints its token counts and rough cost, with a session total
-at the end. pricing lives in `cost.py` (dollars per 1m tokens, update
+at the end. `--max-cost 1.50` stops the loop with a clean message once
+the session spend passes the budget (models without a pricing row
+never trip it). pricing lives in `cost.py` (dollars per 1m tokens, update
 as prices move); models not in the table show "unknown pricing".
 
 ## how it works

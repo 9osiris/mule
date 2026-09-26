@@ -46,9 +46,15 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
 
     for step in range(max_steps):
         reply = chat(messages, tools.schemas())
-        if usage_cb:
-            usage_cb(step + 1, reply.get("usage"))
+        stop = usage_cb(step + 1, reply.get("usage")) if usage_cb else False
         messages.append(_clean_reply(reply))
+        if stop:
+            # usage_cb asked to stop, e.g. the cost budget ran out
+            messages.append({
+                "role": "assistant",
+                "content": "stopped: hit cost budget",
+            })
+            return messages
 
         calls = reply.get("tool_calls") or []
         if not calls:

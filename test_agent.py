@@ -848,6 +848,46 @@ check("empty query errors",
 names = [t["function"]["name"] for t in stools.schemas()]
 check("web_search registered", "web_search" in names)
 
+# cost budget: tiny budget stops the loop after one step
+
+def budget_chat(messages, tools):
+    return {"role": "assistant", "content": "spending...",
+            "usage": {"prompt_tokens": 1000000, "completion_tokens": 0},
+            "tool_calls": [{"id": "c1", "type": "function",
+                            "function": {"name": "list_dir",
+                                         "arguments": "{}"}}]}
+
+btools = ToolSet(tempfile.mkdtemp())
+btotals = {"in": 0, "out": 0}
+
+
+def btrack(step, usage):
+    btotals["in"] += usage.get("prompt_tokens", 0)
+    btotals["out"] += usage.get("completion_tokens", 0)
+    spent = cost_for("gpt-4o-mini", btotals["in"], btotals["out"])
+    return spent is not None and spent > 0.01
+
+
+bmsgs = run("spend", budget_chat, btools, system_prompt="t",
+            max_steps=25, usage_cb=btrack)
+check("budget stops the loop early", len(bmsgs) < 10)
+check("budget stop message is clear",
+      bmsgs[-1]["content"] == "stopped: hit cost budget")
+check("budget ran one step", btotals["in"] == 1000000)
+
+# same loop, generous budget: runs all the way
+
+gmsgs = run("spend", budget_chat, btools, system_prompt="t",
+            max_steps=3,
+            usage_cb=lambda s, u: False)
+check("no stop without budget",
+      gmsgs[-1]["content"] == "stopped: hit max steps (3)")
+
+check("--max-cost parses",
+      parse_args(["t", "--max-cost", "0.5"]).max_cost == 0.5)
+check("--max-cost defaults to none",
+      parse_args(["t"]).max_cost is None)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
