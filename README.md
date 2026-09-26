@@ -33,14 +33,27 @@ python main.py "summarize the repo layout" \
 - `--max-steps` - tool rounds before it gives up (default: 25)
 - `--system-prompt` - path to a custom prompt file (default: prompt.md)
 - `--quiet` - only print the final answer
+- `--no-stream` - wait for the full response instead of streaming tokens
+
+responses stream by default: tokens print as they arrive. pass
+`--no-stream` to go back to waiting for the whole reply.
 
 ## how it works
 
 `agent.py` runs the loop: send messages, take the model's tool calls,
-run them, feed results back, repeat. `tools.py` has four tools -
-read_file, write_file, list_dir, run_shell - all sandboxed to `--root`
-so the agent can't wander out of the project dir. `client.py` is the
-http client for /v1/chat/completions. `prompt.md` is the system prompt.
+run them, feed results back, repeat. `tools.py` has five tools -
+read_file, write_file, edit_file, list_dir, run_shell - all sandboxed
+to `--root` so the agent can't wander out of the project dir.
+`client.py` is the http client for /v1/chat/completions, with
+streaming support. `prompt.md` is the system prompt.
+
+## tools
+
+- `read_file` - read a text file
+- `write_file` - write a whole file (creates parent dirs, overwrites)
+- `edit_file` - replace one exact string in a file, must match once
+- `list_dir` - list a directory
+- `run_shell` - run a shell command in the project root
 
 ## safety notes
 

@@ -19,12 +19,6 @@ class ToolSet:
                 "parameters": {"path": "relative path", "content": "full file content"},
                 "run": self.write_file,
             },
-            "edit_file": {
-                "description": "replace one exact string in a file. old must match exactly once.",
-                "parameters": {"path": "relative path", "old": "string to find",
-                               "new": "replacement"},
-                "run": self.edit_file,
-            },
             "list_dir": {
                 "description": "list files in a directory, relative to project root",
                 "parameters": {"path": "relative path, default '.'"},
@@ -86,25 +80,6 @@ class ToolSet:
         with open(full, "w") as f:
             f.write(content or "")
         return "wrote %d bytes to %s" % (len(content or ""), path)
-
-    def edit_file(self, path, old="", new=""):
-        # patch one exact string. must match exactly once or it bails
-        full = self._resolve(path)
-        if not os.path.isfile(full):
-            return "error: no such file: %s" % path
-        if not old:
-            return "error: old string is empty, nothing to replace"
-        with open(full, "r", errors="replace") as f:
-            data = f.read()
-        count = data.count(old)
-        if count == 0:
-            return "error: old string not found in %s" % path
-        if count > 1:
-            return ("error: old string matches %d times in %s, "
-                    "be more specific" % (count, path))
-        with open(full, "w") as f:
-            f.write(data.replace(old, new or "", 1))
-        return "edited %s" % path
 
     def list_dir(self, path="."):
         full = self._resolve(path)

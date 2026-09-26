@@ -139,13 +139,124 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 4)
+      and len(seen["bodies"][0]["tools"]) == 5)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
       open(os.path.join(root2, "srv.txt")).read() == "via server")
 check("final answer came back",
       last_answer(msgs) == "wrote it through the server")
+
+# edit_file: patch one exact string
+
+root4 = tempfile.mkdtemp()
+tools4 = ToolSet(root4)
+app = os.path.join(root4, "app.py")
+open(app, "w").write("name = 'old'\nversion = 1\n")
+dup = os.path.join(root4, "dup.py")
+open(dup, "w").write("x = 1\nx = 2\n")
+
+r = tools4.call("edit_file", {"path": "app.py",
+                              "old": "name = 'old'",
+                              "new": "name = 'new'"})
+check("edit_file ok", r == "edited app.py")
+check("edit_file changed only the match",
+      open(app).read() == "name = 'new'\nversion = 1\n")
+check("edit_file zero matches is an error",
+      tools4.call("edit_file", {"path": "app.py",
+                                "old": "nope", "new": "x"}).startswith("error:"))
+r = tools4.call("edit_file", {"path": "dup.py", "old": "x =", "new": "y ="})
+check("edit_file multiple matches is an error",
+      r.startswith("error:") and "2 times" in r)
+check("edit_file left the file alone on multiple matches",
+      open(dup).read() == "x = 1\nx = 2\n")
+check("edit_file outside root rejected",
+      "escapes project root" in tools4.call(
+          "edit_file", {"path": "../evil.txt", "old": "a", "new": "b"}))
+check("edit_file missing file is an error",
+      tools4.call("edit_file", {"path": "nope.txt",
+                                "old": "a", "new": "b"}).startswith("error:"))
+check("edit_file empty old is an error",
+      tools4.call("edit_file", {"path": "app.py",
+                                "old": "", "new": "x"}).startswith("error:"))
+
+# streaming: fake server speaks SSE, tokens arrive as they come
+
+def sse(delta):
+    return "data: %s\n\n" % json.dumps({"choices": [{"delta": delta}]})
+
+
+full_args = json.dumps({"path": "note.txt", "old": "hello",
+                          "new": "goodbye"})
+arg1, arg2 = full_args[:25], full_args[25:]
+STREAM_RESPONSES = [
+    [sse({"tool_calls": [{"index": 0, "id": "e1",
+                          "function": {"name": "edit_file",
+                                       "arguments": ""}}]}),
+     sse({"tool_calls": [{"index": 0,
+                          "function": {"arguments": arg1}}]}),
+     sse({"tool_calls": [{"index": 0,
+                          "function": {"arguments": arg2}}]})],
+    [sse({"content": "edited"}),
+     sse({"content": " the"}),
+     sse({"content": " file"})],
+]
+stream_seen = {"bodies": []}
+
+
+class StreamHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        stream_seen["bodies"].append(json.loads(self.rfile.read(length)))
+        payload = ("".join(STREAM_RESPONSES.pop(0))
+                   + "data: [DONE]\n\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *a):
+        pass
+
+
+sserver = HTTPServer(("127.0.0.1", 0), StreamHandler)
+threading.Thread(target=sserver.serve_forever, daemon=True).start()
+
+root3 = tempfile.mkdtemp()
+open(os.path.join(root3, "note.txt"), "w").write("hello world\n")
+sclient = ChatClient("http://127.0.0.1:%d/v1" % sserver.server_port,
+                     "fake-key", "fake-model")
+tools3 = ToolSet(root3)
+tokens = []
+
+
+def stream_chat(messages, tools):
+    return sclient.chat_stream(messages, tools, on_token=tokens.append)
+
+
+smsgs = run("change hello to goodbye in note.txt", stream_chat, tools3,
+            system_prompt="t", max_steps=5)
+sserver.shutdown()
+
+check("stream request asked for streaming",
+      stream_seen["bodies"][0].get("stream") is True)
+check("tokens arrived incrementally",
+      tokens == ["edited", " the", " file"])
+check("streamed tool call args reassembled",
+      open(os.path.join(root3, "note.txt")).read() == "goodbye world\n")
+check("streamed answer is the joined tokens",
+      last_answer(smsgs) == "edited the file")
+check("tool result fed back after streamed call",
+      any(m["role"] == "tool" for m in smsgs))
+
+# --no-stream flag parsing
+
+from main import parse_args
+check("--no-stream defaults off",
+      parse_args(["do things"]).no_stream is False)
+check("--no-stream flag turns on",
+      parse_args(["--no-stream", "do things"]).no_stream is True)
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
