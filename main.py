@@ -93,6 +93,9 @@ def build_parser(cfg):
                    help="append this text to the system prompt")
     p.add_argument("--no-color", action="store_true",
                    help="disable ansi color output")
+    p.add_argument("--print", dest="print_mode", action="store_true",
+                   help="print only the final answer, no confirmations, "
+                        "for scripting")
     return p
 
 
@@ -219,8 +222,9 @@ def ask_plan(plan):
 
 def make_chat_fn(args, client):
     def chat_fn(messages, tools):
-        # stream tokens live unless --no-stream was passed
-        if args.no_stream:
+        # stream tokens live unless --no-stream was passed.
+        # --print stays silent, it only wants the final answer.
+        if args.no_stream or getattr(args, "print_mode", False):
             return client.chat(messages, tools)
         printed = []
 
@@ -397,9 +401,11 @@ def main(argv=None):
         return 0
 
     tools = ToolSet(args.root,
-                    confirm=ask_cmd if args.ask else None,
+                    confirm=ask_cmd if (args.ask and not args.print_mode)
+                    else None,
                     ask=ask_user_cli
-                    if (args.interactive or args.ask) else None)
+                    if ((args.interactive or args.ask)
+                        and not args.print_mode) else None)
     from plugins import load_plugins
     plugin_tools, plugin_errors = load_plugins()
     for t in plugin_tools:
@@ -504,6 +510,11 @@ def main(argv=None):
 
     if args.json:
         print(json.dumps(build_result(args, messages, totals), indent=2))
+        return 0
+
+    if args.print_mode:
+        # scripting mode: just the answer, nothing else
+        print(last_answer(messages))
         return 0
 
     if not args.quiet:

@@ -1892,6 +1892,40 @@ _handle_slash("/tools", _ctx)
 check("/tools lists builtins", any("read_file" in l for l in _seen_tools))
 check("/tools lists plugin tools", any("shout" in l for l in _seen_tools))
 
+# --print mode: only the final answer on stdout, no confirmations
+
+import io
+import contextlib
+import main as _main_mod
+
+
+class _FakePrintClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools):
+        return {"role": "assistant", "content": "the answer",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None):
+        if on_token:
+            on_token("SHOULD NOT PRINT")
+        return self.chat(messages, tools)
+
+
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _FakePrintClient
+_print_root = tempfile.mkdtemp()
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["do it", "--print", "--api-key", "x",
+                          "--root", _print_root])
+_main_mod.ChatClient = _real_client
+check("--print exits 0", _rc == 0)
+check("--print prints only the final answer",
+      _buf.getvalue() == "the answer\n")
+check("--print parses", parse_args(["t", "--print"]).print_mode is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
