@@ -1846,6 +1846,52 @@ _sargs.root = _proj
 check("resolve_system appends skills",
       "## skill: tdd" in resolve_system(_sargs))
 
+# plugin tools: ~/.mule/plugins/*.py exposing get_tools()
+
+from plugins import load_plugins, plugin_dir
+
+_old_home = os.environ.get("HOME")
+_phome = tempfile.mkdtemp()
+os.environ["HOME"] = _phome
+_pdir = plugin_dir()
+with open(os.path.join(_pdir, "shout.py"), "w") as f:
+    f.write(
+        "def get_tools():\n"
+        "    return [{'name': 'shout',\n"
+        "             'description': 'yell text',\n"
+        "             'parameters': {'text': 'what to yell'},\n"
+        "             'handler': lambda text='': text.upper()}]\n")
+with open(os.path.join(_pdir, "broken.py"), "w") as f:
+    f.write("def get_tools():\n    raise RuntimeError('boom')\n")
+with open(os.path.join(_pdir, "nogettools.py"), "w") as f:
+    f.write("X = 1\n")
+_ptools, _perrs = load_plugins()
+check("good plugin loads its tool",
+      len(_ptools) == 1 and _ptools[0]["name"] == "shout")
+check("broken plugins become errors, not crashes",
+      len(_perrs) == 2 and any("broken" in e for e in _perrs)
+      and any("nogettools" in e for e in _perrs))
+_pt = ToolSet(root)
+_pt.tools[_ptools[0]["name"]] = _ptools[0]
+check("plugin tool runs through the toolset",
+      _pt.call("shout", {"text": "hey"}) == "HEY")
+check("plugin tool shows up in schemas",
+      any(s["function"]["name"] == "shout" for s in _pt.schemas()))
+if _old_home is None:
+    os.environ.pop("HOME", None)
+else:
+    os.environ["HOME"] = _old_home
+
+# /tools lists builtin and plugin tools
+
+from repl import handle_slash as _handle_slash
+_seen_tools = []
+_ctx = {"write": _seen_tools.append, "tools": _pt, "totals": {"in": 0, "out": 0},
+        "model": "m", "save_fn": lambda n: n, "commands": {}}
+_handle_slash("/tools", _ctx)
+check("/tools lists builtins", any("read_file" in l for l in _seen_tools))
+check("/tools lists plugin tools", any("shout" in l for l in _seen_tools))
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

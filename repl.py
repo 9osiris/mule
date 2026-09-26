@@ -10,6 +10,7 @@ HELP_TEXT = """slash commands:
   /clear       reset the conversation history
   /save NAME   save the session to ~/.mule/sessions/
   /cost        show tokens and spend so far
+  /tools       list available tools
   /undo        restore the most recently changed file"""
 
 
@@ -66,6 +67,10 @@ def handle_slash(line, ctx):
             fmt_cost(cost_for(ctx["model"], t["in"], t["out"]))))
     elif cmd == "undo":
         write(ctx["tools"].undo_last())
+    elif cmd == "tools":
+        names = sorted(ctx["tools"].tools)
+        write("\n".join("  %s - %s" % (n, ctx["tools"].tools[n]["description"])
+                        for n in names))
     elif cmd in commands:
         return ("run", commands[cmd])
     else:

@@ -400,6 +400,16 @@ def main(argv=None):
                     confirm=ask_cmd if args.ask else None,
                     ask=ask_user_cli
                     if (args.interactive or args.ask) else None)
+    from plugins import load_plugins
+    plugin_tools, plugin_errors = load_plugins()
+    for t in plugin_tools:
+        if t["name"] in tools.tools:
+            say(args, "warning: plugin tool %s shadows a builtin, "
+                      "skipping" % t["name"])
+            continue
+        tools.tools[t["name"]] = t
+    for e in plugin_errors:
+        say(args, "warning: %s" % e)
     if args.undo:
         print(tools.undo_last())
         return 0
