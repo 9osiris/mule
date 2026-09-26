@@ -1815,6 +1815,37 @@ check("ask_user needs valid json options",
       _atools.call("ask_user", {"question": "q?",
                                 "options": "nope"}).startswith("error:"))
 
+# skills: .mule/skills/*/SKILL.md appended to the system prompt
+
+from skills import load_skills, skills_prompt
+
+_skill_root = tempfile.mkdtemp()
+os.makedirs(os.path.join(_skill_root, "alpha"))
+with open(os.path.join(_skill_root, "alpha", "SKILL.md"), "w") as f:
+    f.write("always write tests first")
+os.makedirs(os.path.join(_skill_root, "beta"))
+with open(os.path.join(_skill_root, "beta", "SKILL.md"), "w") as f:
+    f.write("   ")
+os.makedirs(os.path.join(_skill_root, "gamma"))  # no SKILL.md inside
+_skills = load_skills(_skill_root)
+check("skills load name and text",
+      _skills == [("alpha", "always write tests first")])
+check("empty SKILL.md and missing SKILL.md are skipped", len(_skills) == 1)
+check("missing skills dir loads nothing", load_skills("/nope") == [])
+_block = skills_prompt(_skills)
+check("skills render with headers",
+      "## skill: alpha" in _block and "write tests first" in _block)
+check("no skills renders empty", skills_prompt([]) == "")
+_proj = tempfile.mkdtemp()
+os.makedirs(os.path.join(_proj, ".mule", "skills", "tdd"))
+with open(os.path.join(_proj, ".mule", "skills", "tdd", "SKILL.md"),
+          "w") as f:
+    f.write("test everything")
+_sargs = parse_args(["t"])
+_sargs.root = _proj
+check("resolve_system appends skills",
+      "## skill: tdd" in resolve_system(_sargs))
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

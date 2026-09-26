@@ -358,13 +358,19 @@ def run_interactive(args, tools, system, messages, task,
 def resolve_system(args):
     # --system replaces the prompt, --system-prompt loads it from a
     # file, otherwise prompt.md or the builtin. --append-system tacks
-    # extra instructions onto whichever one won.
+    # extra instructions onto whichever one won. skills from
+    # .mule/skills/ go on the end.
     if args.system:
         system = args.system
     else:
         system = load_system_prompt(args.system_prompt)
     if args.append_system:
         system = system.rstrip() + "\n\n" + args.append_system
+    from skills import load_skills, skills_prompt
+    block = skills_prompt(load_skills(
+        os.path.join(os.path.abspath(args.root), ".mule", "skills")))
+    if block:
+        system = system.rstrip() + "\n\n" + block
     return system
 
 
