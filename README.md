@@ -59,6 +59,16 @@ python main.py "summarize the repo layout" \
 - `--system TEXT` - replace the system prompt with this text
 - `--append-system TEXT` - append extra instructions to the system prompt
 - `--no-color` - disable ansi colors (also honors the NO_COLOR env var)
+- `--print` - print only the final answer, no confirmations, for scripting
+- `--profile NAME` - use a saved profile from `~/.mule/profiles/`:
+  cli flags beat the profile, the profile beats `mule.json`
+- `--output FILE` - write the final answer to FILE too (works with
+  `--print`)
+- `--temperature F` - sampling temperature, lower is more focused
+- `--max-tokens N` - cap on completion tokens per request
+- `--seed N` - seed for reproducible outputs
+- `--continue` - pick up the most recent saved session, then continue
+  with the task
 
 ## subcommands
 
@@ -127,6 +137,7 @@ turns. slash commands:
 - `/clear` - reset the conversation history
 - `/save NAME` - save the session to `~/.mule/sessions/`
 - `/cost` - show tokens and spend so far
+- `/tools` - list available tools
 - `/undo` - restore the most recently changed file
 
 drop markdown files in `<root>/.mule/commands/` and they become
@@ -177,29 +188,61 @@ project. cheap insurance before letting the agent loose.
 file: turns as `## user` / `## assistant`, tool calls as code
 blocks, cost at the bottom.
 
+## skills and plugins
+
+drop a folder with a `SKILL.md` in `<root>/.mule/skills/` and its
+contents get appended to the system prompt for every run:
+
+```
+.mule/skills/
+  tdd/
+    SKILL.md    # "write a failing test before you change code"
+```
+
+for real code, drop python files in `~/.mule/plugins/`. each file
+exposes a `get_tools()` function returning a list of tool dicts,
+and they show up alongside the builtins (a bad plugin prints a
+warning, it never breaks startup):
+
+```python
+def get_tools():
+    return [{
+        "name": "shout",
+        "description": "yell some text",
+        "parameters": {"text": "what to yell"},
+        "handler": lambda text="": text.upper(),
+    }]
+```
+
+`/tools` in interactive mode lists everything available, plugins
+included.
+
 ## how it works
 
 `agent.py` runs the loop: send messages, take the model's tool calls,
 run them, feed results back, repeat. it also handles plan approval,
 todo progress lines, context compaction, running several tool
 calls from one turn in order, and `--dry-run` (planned calls print
-instead of executing). `tools.py` has ten tools -
+instead of executing). `tools.py` has fifteen tools -
 read_file, write_file, edit_file, list_dir, run_shell, fetch_url,
-web_search, todo_write, todo_read, read_image - all sandboxed to
-`--root` so the agent can't wander out of the project dir (fetch_url
-only does http/https, read_image only loads png/jpg/gif/webp).
-`client.py` is the http client for /v1/chat/completions, with
-streaming support, token usage capture, and retries with
-exponential backoff on 429s and 5xxs. `cost.py` holds rough
-per-model pricing. `sessions.py` saves and resumes conversations
-as jsonl files under `~/.mule/sessions/` and exports them to
-markdown. `checkpoints.py` tars and restores project snapshots.
-`prompt.md` is the system prompt. `repl.py` runs the
+web_search, todo_write, todo_read, read_image, delegate, jobs,
+job_output, job_kill, ask_user - all sandboxed to `--root` so the
+agent can't wander out of the project dir (fetch_url only does
+http/https, read_image only loads png/jpg/gif/webp). `client.py`
+is the http client for /v1/chat/completions, with streaming
+support, token usage capture, optional temperature/max_tokens/seed,
+and retries with exponential backoff on 429s and 5xxs. `cost.py`
+holds rough per-model pricing. `sessions.py` saves and resumes
+conversations as jsonl files under `~/.mule/sessions/` and exports
+them to markdown. `checkpoints.py` tars and restores project
+snapshots. `prompt.md` is the system prompt. `repl.py` runs the
 `--interactive` prompt loop, its slash commands, and custom
 commands from `.mule/commands/`. `scaffold.py` powers `mule init`.
 `doctor.py` runs the `mule doctor` checklist. `complete.py`
 generates the shell completion scripts from the real argument
-parser. `ui.py` is the tiny ansi color layer, off with
+parser. `skills.py` loads `.mule/skills/*/SKILL.md` into the
+system prompt. `plugins.py` loads python tool plugins from
+`~/.mule/plugins/`. `ui.py` is the tiny ansi color layer, off with
 `--no-color` or NO_COLOR.
 
 ## tools
@@ -208,13 +251,21 @@ parser. `ui.py` is the tiny ansi color layer, off with
 - `write_file` - write a whole file (creates parent dirs, overwrites)
 - `edit_file` - replace one exact string in a file, must match once
 - `list_dir` - list a directory
-- `run_shell` - run a shell command in the project root
+- `run_shell` - run a shell command in the project root; pass
+  `background=true` to get a job id back instead of output
 - `fetch_url` - fetch a web page, html stripped to rough text
 - `web_search` - search the web via duckduckgo, returns titles,
   urls, and snippets
 - `todo_write` - replace the todo list (json list of {text, status})
 - `todo_read` - show the current todo list
 - `read_image` - load a png/jpg/gif/webp as a base64 data uri
+- `delegate` - hand a subtask to a subagent with its own history,
+  returns a summary (subagents can't delegate further)
+- `jobs` - list background shell jobs with status and output preview
+- `job_output` - full output of a background job
+- `job_kill` - stop a running background job
+- `ask_user` - ask the human a question with 2-4 options (only
+  works in interactive or `--ask` mode)
 
 ## safety notes
 
