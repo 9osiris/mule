@@ -399,6 +399,13 @@ def ask_cmd(command):
     return ans in ("y", "yes")
 
 
+def ask_critical(command):
+    # the point of no return: only the literal word "yes" runs it
+    print(red("dangerous command: %s" % command))
+    print(red("type 'yes' to run it, anything else aborts"))
+    return input("> ").strip() == "yes"
+
+
 def ask_user_cli(question, options):
     # the human-in-the-loop gate for the ask_user tool
     print(yellow("question: %s" % question))
@@ -817,6 +824,8 @@ def _run(args):
     tools = ToolSet(args.root,
                     confirm=ask_cmd if (args.ask and not args.print_mode)
                     else None,
+                    confirm_critical=ask_critical
+                    if (args.ask and not args.print_mode) else None,
                     ask=ask_user_cli
                     if ((args.interactive or args.ask)
                         and not args.print_mode) else None)

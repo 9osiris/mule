@@ -3026,6 +3026,78 @@ check("--tool-timeout cuts off a stuck tool",
 check("--tool-timeout parses",
       parse_args(["t", "--tool-timeout", "5"]).tool_timeout == 5.0)
 
+# safety: dangerous denylist, critical commands, secrets warnings
+
+from tools import DANGEROUS, CRITICAL, _matches
+
+check("denylist catches disk writes",
+      _matches(DANGEROUS, "cat x > /dev/sda") == "writing to a raw disk")
+check("denylist catches chmod 777 /",
+      _matches(DANGEROUS, "chmod -R 777 / ") == "chmod 777 on /")
+check("denylist leaves normal commands alone",
+      _matches(DANGEROUS, "ls -la") is None)
+check("critical catches rm -rf /",
+      _matches(CRITICAL, "rm -rf /") == "rm -rf /")
+check("critical catches sudo rm -rf /*",
+      _matches(CRITICAL, "sudo rm -rf /*") == "rm -rf /")
+check("critical catches mkfs",
+      _matches(CRITICAL, "mkfs.ext4 /dev/sda1") == "mkfs")
+check("critical catches dd to a device",
+      _matches(CRITICAL, "dd if=/dev/zero of=/dev/sda bs=1M")
+      == "dd to a device")
+check("critical catches fork bombs",
+      _matches(CRITICAL, ":(){ :|:& };:") == "fork bomb")
+check("critical leaves rm of a file alone",
+      _matches(CRITICAL, "rm -rf ./build") is None)
+check("critical leaves dd to a file alone",
+      _matches(CRITICAL, "dd if=/dev/zero of=swap bs=1M count=1") is None)
+
+_st = ToolSet(tempfile.mkdtemp())
+check("run_shell refuses dangerous commands outright",
+      _st.run_shell("echo hi > /dev/sda").startswith("refused:"))
+check("run_shell refuses critical commands without a human",
+      _st.run_shell("rm -rf /").startswith("refused:"))
+check("run_shell still runs normal commands",
+      _st.run_shell("echo hi").startswith("exit 0"))
+
+_seen_critical = []
+_st2 = ToolSet(tempfile.mkdtemp(),
+               confirm_critical=lambda c: _seen_critical.append(c)
+               or False)
+check("critical command declined without the magic word",
+      _st2.run_shell("mkfs.ext4 /dev/sda1").startswith("refused:")
+      and _seen_critical == ["mkfs.ext4 /dev/sda1"])
+_st3 = ToolSet(tempfile.mkdtemp(), confirm_critical=lambda c: True)
+check("critical command runs after a typed yes",
+      _st3.run_shell("echo mkfs ").startswith("exit 0"))
+
+from unittest.mock import patch
+from main import ask_critical
+with patch("builtins.input", return_value="yes"):
+    check("ask_critical accepts the literal word yes",
+          ask_critical("rm -rf /") is True)
+with patch("builtins.input", return_value="y"):
+    check("ask_critical rejects a plain y",
+          ask_critical("rm -rf /") is False)
+with patch("builtins.input", return_value="YES"):
+    check("ask_critical is case sensitive",
+          ask_critical("rm -rf /") is False)
+
+_warns = []
+_st4 = ToolSet(tempfile.mkdtemp(), warn=_warns.append)
+with open(os.path.join(_st4.root, ".env"), "w") as _ef:
+    _ef.write("AWS_KEY=AKIAIOSFODNN7EXAMPLE\n")
+with open(os.path.join(_st4.root, "clean.txt"), "w") as _cf:
+    _cf.write("hello world\n")
+_st4.read_file(".env")
+check("secrets warning fires on credential files",
+      len(_warns) == 1 and "aws access key" in _warns[0]
+      and ".env" in _warns[0])
+_st4.read_file("clean.txt")
+check("no warning for clean files", len(_warns) == 1)
+_st4.grep("AWS", ".")
+check("grep warns when results contain secrets", len(_warns) == 2)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
