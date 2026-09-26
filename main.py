@@ -181,7 +181,7 @@ def parse_args(argv=None):
 
 
 SUBCOMMANDS = ("init", "config", "doctor", "completion", "models",
-               "sessions")
+               "sessions", "help", "examples")
 
 
 def run_subcommand(name, rest):
@@ -229,8 +229,76 @@ def run_subcommand(name, rest):
         return 0
     if name == "sessions":
         return cmd_sessions(rest)
+    if name == "help":
+        return cmd_help(rest)
+    if name == "examples":
+        return cmd_examples()
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
+
+
+EXAMPLES = """examples:
+  mule "fix the failing test in test_auth.py"
+  mule "add docstrings to agent.py" --ask
+  mule "summarize this repo" --readonly --print
+  mule --interactive
+  mule "refactor main.py" --plan
+  mule "write a haiku about git" --model gpt-4o-mini --print
+  mule "find dead code" --allow-tools read_file,grep,find
+  mule "check the diff" --no-network
+  mule --template review "main.py"
+  mule sessions stats
+  mule config set model gpt-4o"""
+
+
+def cmd_examples():
+    print(EXAMPLES)
+    return 0
+
+
+HELP_TOPICS = {
+    "tools": """tools the agent can call:
+  read_file, write_file, edit_file, apply_patch   files
+  list_dir, tree, find, grep, read_many, file_info  browsing
+  run_shell, jobs, job_output, job_kill            shell
+  git_status, git_diff, git_log                   git
+  fetch_url, web_search, http_post                network
+  todo_write, todo_read                           planning
+  ask_user, delegate, read_image                   misc
+gate them with --allow-tools, --deny-tools,
+--readonly, or --no-network.""",
+    "config": """config lives in ./mule.json, falling back to
+~/.config/mule/mule.json. local beats home, env beats
+config, flags beat everything.
+  mule config list            show every key
+  mule config get KEY         read one key
+  mule config set KEY VALUE   write one key
+  mule config unset KEY       remove one key
+keys: model, api_key, base_url, max_steps, ask,
+reflect, readonly, no_network, allow_tools...""",
+    "sessions": """every run auto-saves to ~/.mule/sessions/.
+  mule --list-sessions            list them
+  mule --continue                 resume the newest
+  mule --fork NAME                branch off one
+  mule --search-sessions QUERY    search them
+  mule sessions rename OLD NEW    rename one
+  mule sessions rm NAME           delete one
+  mule sessions stats             message counts""",
+    "examples": EXAMPLES,
+}
+
+
+def cmd_help(rest):
+    # mule help [tools|config|sessions|examples]
+    if not rest:
+        print("usage: mule help tools|config|sessions|examples")
+        return 2
+    topic = rest[0].lower()
+    if topic not in HELP_TOPICS:
+        print("unknown help topic: %s" % rest[0], file=sys.stderr)
+        return 2
+    print(HELP_TOPICS[topic])
+    return 0
 
 
 def cmd_sessions(rest):

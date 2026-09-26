@@ -2720,6 +2720,38 @@ check("parse_args warns about bad config",
       and "should be true or false" in _err.getvalue())
 config.LOCAL_CONFIG = "/nonexistent/mule.json"
 
+# mule help and mule examples
+
+from main import cmd_help, cmd_examples
+
+for _topic in ("tools", "config", "sessions", "examples"):
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        _rc = _main_mod.main(["help", _topic])
+    check("mule help %s exits 0 with content" % _topic,
+          _rc == 0 and len(_buf.getvalue()) > 50)
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["help"])
+check("mule help without a topic shows usage", _rc == 2)
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    _rc = _main_mod.main(["help", "bogus"])
+check("mule help rejects bad topics", _rc == 2)
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["examples"])
+check("mule examples prints examples",
+      _rc == 0 and "mule" in _buf.getvalue()
+      and "--interactive" in _buf.getvalue())
+_buf1, _buf2 = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(_buf1):
+    _r1 = cmd_help(["examples"])
+with contextlib.redirect_stdout(_buf2):
+    _r2 = cmd_examples()
+check("mule help examples matches mule examples",
+      _r1 == _r2 == 0 and _buf1.getvalue() == _buf2.getvalue())
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
