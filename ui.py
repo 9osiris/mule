@@ -139,7 +139,7 @@ MULE_HEAD = r"""   /\ /\
     \______/"""
 
 
-# --- plain markdown rendering (stdlib) ---
+# plain markdown rendering, stdlib only
 
 def _inline_md(text):
     # `code` spans are stashed first so * inside them is untouched.
@@ -189,7 +189,7 @@ def render_markdown_plain(text):
     return "\n".join(out)
 
 
-# --- tool transcript: compact claude-code style lines ---
+# tool transcript, one line per call
 
 def args_summary(args):
     # {"path": ".", "x": 1} -> 'path=., x=1', values cut at 60
@@ -265,9 +265,8 @@ def _cell(text, width):
 
 
 def welcome_screen(version, model, root, recent, tips):
-    # repl welcome, claude-code style: the mark and model on the
-    # left, recent sessions and tips on the right. cells are
-    # padded as plain text first, then colorized whole, so the
+    # repl welcome: the mark and model on the left, recent
+    # sessions and tips on the right. cells are padded as plain text first, then colorized whole, so the
     # columns stay aligned with color on or off.
     w, lw, rw, gap = 76, 32, 38, 4
     title = " mule v%s " % version
@@ -378,7 +377,7 @@ class ThreadSpinner:
             self._thread = None
 
 
-# --- renderers: plain stdlib vs rich ---
+# renderers: plain stdlib vs rich
 
 class _PlainStream:
     # no rich: tokens go straight to the terminal, raw.

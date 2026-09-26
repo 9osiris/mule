@@ -46,6 +46,9 @@ class FakeClient:
 
 
 class FakeTools:
+    def __init__(self):
+        self.disabled = set()
+
     def schemas(self):
         return [{"type": "function",
                  "function": {"name": "list_dir", "description": "x"}}]
@@ -53,10 +56,22 @@ class FakeTools:
     def call(self, name, args):
         return "fake result for " + name
 
+    def disable_tool(self, name):
+        self.disabled.add(name)
+        return True
+
+    def enable_tool(self, name):
+        self.disabled.discard(name)
+        return True
+
 
 def make_args():
     return types.SimpleNamespace(model="gpt-4o-mini", root="/tmp",
                                  max_steps=5, version="test",
+                                 base_url="http://127.0.0.1:1/v1",
+                                 readonly=False, allow_network=False,
+                                 no_network=False, deny_tools="",
+                                 allow_tools="",
                                  context_budget=100000)
 
 
@@ -120,8 +135,10 @@ def test_index():
         check("index 200", status == 200)
         check("index is html", "text/html" in headers.get("Content-Type", ""))
         check("index has title", b"<title>mule</title>" in body)
-        check("index has sidebar", b'id="sessions"' in body)
-        check("index has composer", b'id="input"' in body)
+        check("index has sidebar", b'id="sess"' in body)
+        check("index has composer", b'id="in"' in body)
+        check("index has file tree", b'id="tree"' in body)
+        check("index shows brand", b"mule 3.1" in body or b"id=\"brandcap\"" in body)
         check("no external scripts",
               b'src="http' not in body and b"href=\"http" not in body)
     finally:
@@ -256,9 +273,125 @@ def test_errors():
         s.close()
 
 
+def test_info_brand():
+    s = Server([("tokens", ["hi"])])
+    try:
+        status, body, _ = s.get("/api/info")
+        info = json.loads(body)
+        check("info 200", status == 200)
+        check("info has brand mule 3.1", info.get("brand") == "mule 3.1")
+        check("info has base_url", info.get("base_url") == "http://127.0.0.1:1/v1")
+        check("info readonly flag", info.get("readonly") is False)
+    finally:
+        s.close()
+
+
+def test_tree():
+    s = Server([("tokens", ["hi"])])
+    try:
+        root = tempfile.mkdtemp(prefix="mule-tree-")
+        os.makedirs(os.path.join(root, "sub"))
+        open(os.path.join(root, "a.txt"), "w").write("x")
+        open(os.path.join(root, ".hidden"), "w").write("x")
+        s.post("/api/root", {"path": root})
+        status, body, _ = s.get("/api/tree")
+        d = json.loads(body)
+        names = [e["name"] for e in d["entries"]]
+        check("tree 200", status == 200)
+        check("tree lists file", "a.txt" in names)
+        check("tree lists dir", "sub" in names)
+        check("tree skips dotfiles", ".hidden" not in names)
+        status, body, _ = s.get("/api/tree?dir=" + urllib.parse.quote("../.."))
+        check("tree blocks escape", status == 400)
+    finally:
+        s.close()
+
+
+def test_root_switch():
+    s = Server([("tokens", ["hi"])])
+    try:
+        root = tempfile.mkdtemp(prefix="mule-root-")
+        status, body = s.post("/api/root", {"path": root})
+        d = json.loads(body)
+        check("root switch 200", status == 200 and d.get("ok"))
+        check("root switch echoes path", d.get("root") == root)
+        status, body = s.post("/api/root", {"path": "/no/such/dir/xyz"})
+        check("root rejects bad path", status == 400)
+        status, body = s.post("/api/root", {"path": ""})
+        check("root rejects empty", status == 400)
+    finally:
+        s.close()
+
+
+def test_model_switch():
+    s = Server([("tokens", ["hi"])])
+    try:
+        status, body = s.post("/api/model", {"model": "deepseek-v4-flash"})
+        d = json.loads(body)
+        check("model switch 200", status == 200 and d.get("ok"))
+        check("model switch echoes", d.get("model") == "deepseek-v4-flash")
+        _, ibody, _ = s.get("/api/info")
+        check("info reflects model", json.loads(ibody)["model"] == "deepseek-v4-flash")
+        status, _ = s.post("/api/model", {"model": ""})
+        check("model rejects empty", status == 400)
+    finally:
+        s.close()
+
+
+def test_readonly_toggle():
+    s = Server([("tokens", ["hi"])])
+    try:
+        status, body = s.post("/api/readonly", {"on": True})
+        d = json.loads(body)
+        check("readonly on", status == 200 and d.get("readonly") is True)
+        check("readonly disables writes",
+              "write_file" in s.httpd.ctx.tools.disabled)
+        status, body = s.post("/api/readonly", {"on": False})
+        check("readonly off", json.loads(body).get("readonly") is False)
+        check("readonly re-enables",
+              "write_file" not in s.httpd.ctx.tools.disabled)
+    finally:
+        s.close()
+
+
+def test_rename_session():
+    s = Server([("tokens", ["hello"])])
+    try:
+        status, events = s.chat_events("make a session")
+        sid = next(e["session_id"] for e in events if e["type"] == "done")
+        status, body = s.post("/api/session/rename",
+                              {"id": sid, "name": "renamed-chat"})
+        check("rename 200", status == 200 and json.loads(body).get("ok"))
+        _, lbody, _ = s.get("/api/sessions")
+        ids = [x["id"] for x in json.loads(lbody)["sessions"]]
+        check("rename took effect", "renamed-chat" in ids and sid not in ids)
+        status, _ = s.post("/api/session/rename",
+                           {"id": "nope", "name": "x"})
+        check("rename missing 404", status == 404)
+    finally:
+        s.close()
+
+
+def test_stop_endpoint():
+    s = Server([("tokens", ["hi"])])
+    try:
+        status, body = s.post("/api/stop", {})
+        check("stop 200", status == 200 and json.loads(body).get("ok"))
+        check("stop sets the event", s.httpd.ctx.stop.is_set())
+    finally:
+        s.close()
+
+
 def main():
     test_index()
     test_info()
+    test_info_brand()
+    test_tree()
+    test_root_switch()
+    test_model_switch()
+    test_readonly_toggle()
+    test_rename_session()
+    test_stop_endpoint()
     test_chat_stream_and_session()
     test_chat_tool_events()
     test_chat_continues_session()

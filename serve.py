@@ -1,4 +1,4 @@
-"""mule serve: a local web chat ui in the style of gpt4all.
+"""mule serve: a local web chat ui for the mule agent.
 
 one self-contained page (webui.html), no build step, no npm, no
 external requests. the backend is stdlib only: ThreadingHTTPServer
@@ -29,6 +29,56 @@ class Ctx:
         self.client = client
         self.tools = tools
         self.system = system
+        self.stop = threading.Event()  # set by /api/stop, clears per chat
+        self.brand = "mule 3.1"
+
+    def rebuild_tools(self, root):
+        # fresh tool set pointed at a new project root, same gates
+        from tools import ToolSet
+        tools = ToolSet(os.path.abspath(root))
+        from plugins import load_plugins
+        plugin_tools, _ = load_plugins()
+        for t in plugin_tools:
+            if t["name"] not in tools.tools:
+                tools.tools[t["name"]] = t
+        from main import apply_tool_gates
+        apply_tool_gates(self.args, tools)
+        self.tools = tools
+
+
+READONLY_TOOLS = ("write_file", "edit_file", "apply_patch", "run_shell")
+
+_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
+              "dist", "build", ".next", "target"}
+
+
+def _tree_entries(root, rel=".", depth=0, max_depth=3, cap=400, out=None):
+    # flat file listing for the ui sidebar, dirs first, no junk
+    if out is None:
+        out = []
+    if depth > max_depth or len(out) >= cap:
+        return out
+    full = os.path.join(root, rel)
+    try:
+        names = sorted(os.listdir(full))
+    except OSError:
+        return out
+    dirs = [n for n in names
+            if os.path.isdir(os.path.join(full, n))
+            and not n.startswith(".") and n not in _SKIP_DIRS]
+    files = [n for n in names
+             if not os.path.isdir(os.path.join(full, n))
+             and not n.startswith(".")]
+    for n in dirs + files:
+        if len(out) >= cap:
+            break
+        p = n if rel == "." else os.path.join(rel, n)
+        out.append({"name": n, "path": p.replace(os.sep, "/"),
+                    "dir": os.path.isdir(os.path.join(full, n)),
+                    "depth": depth})
+        if os.path.isdir(os.path.join(full, n)):
+            _tree_entries(root, p, depth + 1, max_depth, cap, out)
+    return out
 
 
 def _preview(messages):
@@ -115,8 +165,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/info":
             self._json({"version": ctx.args.version
                         if hasattr(ctx.args, "version") else "dev",
+                        "brand": ctx.brand,
                         "model": ctx.args.model,
-                        "root": os.path.abspath(ctx.args.root)})
+                        "base_url": ctx.args.base_url,
+                        "root": os.path.abspath(ctx.args.root),
+                        "readonly": bool(getattr(ctx.args, "readonly",
+                                                 False))})
         elif path == "/api/sessions":
             items = []
             for name in sessions.list_sessions():
@@ -145,16 +199,36 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json({"id": sid,
                         "messages": _public_messages(msgs)})
+        elif path == "/api/tree":
+            rel = self._query().get("dir", ["."])[0]
+            root = os.path.abspath(ctx.args.root)
+            full = os.path.abspath(os.path.join(root, rel))
+            # paths can't escape the project root
+            if full != root and not full.startswith(root + os.sep):
+                self._json({"error": "outside project root"}, 400)
+                return
+            if not os.path.isdir(full):
+                self._json({"error": "not a directory"}, 400)
+                return
+            self._json({"root": root,
+                        "entries": _tree_entries(root, os.path.relpath(
+                            full, root))})
         else:
             self._json({"error": "not found"}, 404)
 
+    def _body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            return json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, OSError):
+            return None
+
     def do_POST(self):
         path = self._path()
+        ctx = self.server.ctx
         if path == "/api/chat":
-            length = int(self.headers.get("Content-Length", 0))
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-            except (ValueError, OSError):
+            body = self._body()
+            if body is None:
                 self._json({"error": "bad json body"}, 400)
                 return
             message = (body.get("message") or "").strip()
@@ -163,10 +237,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._handle_chat(message, body.get("session_id"))
         elif path == "/api/session/delete":
-            length = int(self.headers.get("Content-Length", 0))
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-            except (ValueError, OSError):
+            body = self._body()
+            if body is None:
                 self._json({"error": "bad json body"}, 400)
                 return
             sid = body.get("id")
@@ -179,6 +251,66 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "no such session"}, 404)
                 return
             self._json({"ok": True})
+        elif path == "/api/session/rename":
+            body = self._body()
+            if body is None:
+                self._json({"error": "bad json body"}, 400)
+                return
+            sid, name = body.get("id"), (body.get("name") or "").strip()
+            if not sid or not name:
+                self._json({"error": "missing id or name"}, 400)
+                return
+            try:
+                sessions.rename_session(sid, name)
+            except ValueError:
+                self._json({"error": "no such session"}, 404)
+                return
+            self._json({"ok": True, "id": name})
+        elif path == "/api/stop":
+            ctx.stop.set()
+            self._json({"ok": True})
+        elif path == "/api/model":
+            body = self._body()
+            if body is None:
+                self._json({"error": "bad json body"}, 400)
+                return
+            model = (body.get("model") or "").strip()
+            if not model:
+                self._json({"error": "missing model"}, 400)
+                return
+            ctx.args.model = model
+            ctx.client.model = model
+            self._json({"ok": True, "model": model})
+        elif path == "/api/root":
+            body = self._body()
+            if body is None:
+                self._json({"error": "bad json body"}, 400)
+                return
+            root = (body.get("path") or "").strip()
+            if not root or not os.path.isdir(root):
+                self._json({"error": "not a directory: %s" % root}, 400)
+                return
+            root = os.path.abspath(root)
+            ctx.args.root = root
+            try:
+                ctx.rebuild_tools(root)
+            except Exception as e:
+                self._json({"error": "%s" % e}, 500)
+                return
+            self._json({"ok": True, "root": root})
+        elif path == "/api/readonly":
+            body = self._body()
+            if body is None:
+                self._json({"error": "bad json body"}, 400)
+                return
+            on = bool(body.get("on"))
+            for name in READONLY_TOOLS:
+                if on:
+                    ctx.tools.disable_tool(name)
+                else:
+                    ctx.tools.enable_tool(name)
+            ctx.args.readonly = on
+            self._json({"ok": True, "readonly": on})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -235,8 +367,10 @@ class Handler(BaseHTTPRequestHandler):
             if usage:
                 totals["in"] += usage.get("prompt_tokens", 0)
                 totals["out"] += usage.get("completion_tokens", 0)
-            return False
+            # the stop button sets this between steps
+            return "user pressed stop" if ctx.stop.is_set() else False
 
+        ctx.stop.clear()
         try:
             out = agent.run(
                 message, chat_fn, ctx.tools,
@@ -280,7 +414,6 @@ def cmd_serve(rest):
     # shares every model/root flag with the normal run.
     from main import parse_args, resolve_system, __version__
     from client import ChatClient
-    from tools import ToolSet
     from ui import red
     port = 8321
     no_browser = False
@@ -312,16 +445,9 @@ def cmd_serve(rest):
                         temperature=args.temperature,
                         max_tokens=args.max_tokens, seed=args.seed,
                         trace_file=args.trace)
-    tools = ToolSet(os.path.abspath(args.root))
-    from plugins import load_plugins
-    plugin_tools, _ = load_plugins()
-    for t in plugin_tools:
-        if t["name"] not in tools.tools:
-            tools.tools[t["name"]] = t
-    from main import apply_tool_gates
-    apply_tool_gates(args, tools)
     system = resolve_system(args)
-    ctx = Ctx(args, client, tools, system)
+    ctx = Ctx(args, client, None, system)
+    ctx.rebuild_tools(args.root)
     server = make_server(ctx, port)
     url = "http://127.0.0.1:%d/" % server.server_address[1]
     print("mule web ui on %s" % url)

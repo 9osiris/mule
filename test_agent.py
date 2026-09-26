@@ -1370,6 +1370,50 @@ short = [{"role": "system", "content": "s"},
 check("short history untouched",
       compact_messages(short, cchat)[0] == short)
 
+# compaction never orphans tool results: the kept tail may not
+# start with tool messages whose tool_calls were summarized away
+def _pair(i):
+    return ({"role": "assistant", "content": "",
+             "tool_calls": [{"id": "call_%d" % i, "type": "function",
+                             "function": {"name": "read",
+                                           "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "call_%d" % i,
+             "content": "ok"})
+long = [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
+for i in range(8):
+    long.extend(_pair(i))
+long.append({"role": "user", "content": "latest"})
+summarized, _ = compact_messages(long, cchat, keep_last=10)
+check("compacted tail starts clean",
+      summarized[2]["role"] != "tool")
+ids = set()
+ok = True
+for m in summarized:
+    for c in m.get("tool_calls") or []:
+        ids.add(c["id"])
+    if m["role"] == "tool" and m["tool_call_id"] not in ids:
+        ok = False
+check("every kept tool result has its call", ok)
+
+# resuming a session saved mid tool-loop drops the orphan call
+orph = [{"role": "user", "content": "q"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "read", "arguments": "{}"}}]}]
+rout = run("next", nchat, ToolSet(tempfile.mkdtemp()),
+           messages=orph, max_steps=2)
+check("resume drops orphan tool_calls",
+      not any(m.get("tool_calls") for m in rout))
+
+# an old session with orphaned tool results gets repaired too
+orph2 = [{"role": "user", "content": "[earlier context summarized]\nsummary"},
+         {"role": "tool", "tool_call_id": "call_9", "content": "ok"},
+         {"role": "user", "content": "go"}]
+rout2 = run(None, nchat, ToolSet(tempfile.mkdtemp()),
+            messages=orph2, max_steps=1)
+check("resume drops orphan tool results",
+      not any(m.get("role") == "tool" for m in rout2))
+
 # the summary call counts toward cost tracking
 
 def uchat(messages, tools):
@@ -2290,7 +2334,7 @@ if _cont_home is None:
 else:
     os.environ["HOME"] = _cont_home
 
-# --- batch A: agent loop upgrades ---
+# batch A: agent loop upgrades
 
 # --max-tools stops the loop after N tool executions
 
@@ -2539,7 +2583,7 @@ check("--parallel-tools parses",
       parse_args(["t", "--parallel-tools"]).parallel_tools is True)
 check("--verbose parses", parse_args(["t", "--verbose"]).verbose is True)
 
-# --- batch B: more agent tools ---
+# batch B: more agent tools
 
 _grep_root = tempfile.mkdtemp()
 open(os.path.join(_grep_root, "a.py"), "w").write("import os\nprint('hello')\n")
@@ -2693,7 +2737,7 @@ _post_server.shutdown()
 
 _post_server.shutdown()
 
-# --- batch C: sessions and repl ---
+# batch C: sessions and repl
 
 _sess_home = os.environ.get("HOME")
 os.environ["HOME"] = tempfile.mkdtemp()
@@ -2857,7 +2901,7 @@ check("compress_history keeps system plus a recap",
       len(_cmp) == 2 and _cmp[0]["role"] == "system"
       and "we fixed the bug" in _cmp[1]["content"])
 
-# --- batch D: config and cli ---
+# batch D: config and cli
 
 from main import apply_tool_gates
 

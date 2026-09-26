@@ -135,11 +135,11 @@ error, `130` you pressed ctrl-c.
   `cost.py`, no api call needed.
 - `mule sessions rename OLD NEW | rm NAME | stats` - rename or
   delete a saved session, or show per-session message counts.
-- `mule serve [--port 8321] [--no-browser]` - local web chat ui,
-  gpt4all-style: sidebar with sessions, streaming markdown, tool
-  calls shown as a compact transcript. one self-contained page,
-  no build step, no external requests. bound to 127.0.0.1 only,
-  shares every model/root flag with a normal run.
+- `mule serve [--port 8321] [--no-browser]` - local web chat ui:
+  sidebar with sessions, streaming markdown, tool calls shown as
+  a compact transcript. one self-contained page, no build step,
+  no external requests. bound to 127.0.0.1 only, shares every
+  model/root flag with a normal run.
 - `mule help tools|config|sessions|serve|examples` - topic help.
 - `mule examples` - copy-pasteable example invocations.
 - `mule demo` - run the whole loop against a fake local model, no
@@ -254,18 +254,35 @@ prompt before anything is applied.
 
 ## web ui
 
-`mule serve` starts a local chat app in your browser, in the style
-of gpt4all's desktop ui: a sidebar with your saved sessions, a
-composer, streamed markdown replies, and tool calls rendered as a
-compact transcript you can expand. everything is one
-self-contained page (`webui.html`): no build step, no cdn, no
-external requests, and the server only listens on 127.0.0.1.
+`mule serve` starts a local chat app in your browser: a sidebar
+with your saved sessions, a composer, streamed markdown replies,
+and tool calls rendered as a compact transcript you can expand.
+everything is one self-contained page (`webui.html`): no build
+step, no cdn, no external requests, and the server only listens
+on 127.0.0.1.
 
 ```bash
 mule serve                                # opens http://127.0.0.1:8321/
 mule serve --port 9000 --root ~/proj --model deepseek-v4-flash
 mule serve --no-browser                   # just print the url
 ```
+
+chats in the web ui save to the same `~/.mule/sessions/` files as
+the cli, so you can start in the browser and resume with
+`mule --resume NAME`. one chat runs at a time; a second request
+while one is streaming gets a 409 until it finishes.
+
+what the ui gives you:
+
+- search, rename, export (markdown), and delete chats from the sidebar
+- a stop button to cancel a running reply mid-stream
+- a project folder switcher: point mule at a different directory
+  without restarting the server
+- a model picker: swap the model id per session, no restart needed
+- a file tree of the project folder; click a file to paste its
+  path into the composer
+- readonly mode toggle (disables writes and shell), dark theme,
+  per-message copy buttons, and token/cost footers on replies
 
 chats in the web ui save to the same `~/.mule/sessions/` files as
 the cli, so you can start in the browser and resume with

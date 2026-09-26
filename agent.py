@@ -2842,8 +2842,16 @@ def compact_messages(messages, chat, keep_last=10):
     head = 1 if (messages and messages[0].get("role") == "system") else 0
     if len(messages) <= head + keep_last + 1:
         return messages, None
-    middle = messages[head:-keep_last]
-    tail = messages[-keep_last:]
+    cut = len(messages) - keep_last
+    # never split a tool exchange: a tail that starts with tool
+    # results but not their tool_calls gets rejected by strict
+    # gateways ("tool_result without a matching tool_use").
+    while cut < len(messages) and messages[cut].get("role") == "tool":
+        cut += 1
+    if cut >= len(messages) - 1:
+        return messages, None  # nothing summarizable left, skip
+    middle = messages[head:cut]
+    tail = messages[cut:]
     reply = chat([
         {"role": "system",
          "content": "summarize the conversation below in a few sentences. "
@@ -2874,6 +2882,11 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         messages = list(messages) + [{"role": "user", "content": task}]
     else:
         messages = list(messages)
+
+    # a session saved mid tool-loop (killed, stopped on budget) or
+    # cut by an old compaction can hold orphaned tool calls or
+    # results. strict gateways 400 on either, so repair on load.
+    messages = _sanitize_history(messages)
 
     last_todos = None
     tool_count = 0
@@ -2940,10 +2953,15 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         stop = usage_cb(step + 1, reply.get("usage")) if usage_cb else False
         messages.append(_clean_reply(reply))
         if stop:
-            # usage_cb asked to stop, e.g. the cost budget ran out
+            # usage_cb asked to stop, e.g. the cost budget ran out.
+            # the reply may carry tool_calls we will never run,
+            # so drop them instead of saving an orphan. a string
+            # return from usage_cb becomes the stop note.
+            messages[-1].pop("tool_calls", None)
+            note = stop if isinstance(stop, str) else "hit cost budget"
             messages.append({
                 "role": "assistant",
-                "content": "stopped: hit cost budget",
+                "content": "stopped: " + note,
             })
             return messages
 
@@ -2952,6 +2970,8 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
             return messages  # model is done talking, no tools wanted
 
         if max_tools is not None and tool_count >= max_tools:
+            # same orphan rule: the reply's tool_calls are dropped
+            messages[-1].pop("tool_calls", None)
             messages.append({
                 "role": "assistant",
                 "content": "stopped: hit max tools (%d)" % max_tools,
@@ -3030,6 +3050,39 @@ def _clean_reply(reply):
     if reply.get("reasoning_content"):
         msg["reasoning_content"] = reply["reasoning_content"]
     return msg
+
+
+def _sanitize_history(messages):
+    # walk loaded history once, dropping tool calls that never got
+    # results and results whose call is gone. valid histories pass
+    # through untouched: results always sit right after their call.
+    out = []
+    ids = set()
+    i, n = 0, len(messages)
+    while i < n:
+        m = messages[i]
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            got = set()
+            j = i + 1
+            while j < n and messages[j].get("role") == "tool":
+                got.add(messages[j].get("tool_call_id"))
+                j += 1
+            kept = [c for c in m["tool_calls"] if c.get("id") in got]
+            m = dict(m)
+            if kept:
+                m["tool_calls"] = kept
+            else:
+                m.pop("tool_calls", None)
+            ids.update(c.get("id") for c in kept)
+        if m.get("role") == "assistant":
+            for c in m.get("tool_calls") or []:
+                ids.add(c.get("id"))
+        if m.get("role") == "tool" and m.get("tool_call_id") not in ids:
+            i += 1
+            continue
+        out.append(m)
+        i += 1
+    return out
 
 
 def last_answer(messages):

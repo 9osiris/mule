@@ -74,3 +74,19 @@ model, token counts, cost. the rule above it is brand amber.
 `--no-color` or the `NO_COLOR` env var disables everything: no
 amber, no panels styling (plain text frames), no spinner. the
 information stays, the decoration goes.
+
+## the web ui mark
+
+`mule serve` uses a mono line-art mark in the sidebar, next to a
+serif "mule" wordmark. the ui brands itself as "mule 3.1" in the
+sidebar footer and the browser tab.
+
+```
+,__    __,
+|  \__/  |
+|  .  .  |
+ \______/
+```
+
+the ui is light editorial by default: white page, pale sidebar,
+thin neutral borders, serif headlines, dark mode on toggle.

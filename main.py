@@ -369,7 +369,7 @@ reflect, readonly, no_network, allow_tools...""",
   mule sessions rm NAME           delete one
   mule sessions stats             message counts""",
     "examples": EXAMPLES,
-    "serve": """a local web chat ui, gpt4all-style. one page, no build
+    "serve": """a local web chat ui. one page, no build
 step, no external requests, bound to 127.0.0.1 only.
   mule serve                      open http://127.0.0.1:8321/
   mule serve --port 9000          pick a port
