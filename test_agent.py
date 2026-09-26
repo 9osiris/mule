@@ -1839,7 +1839,7 @@ check("--system and --append-system combine",
                                  "--append-system", "extra"]))
       == "base\n\nextra")
 check("no flags keeps the default prompt",
-      "coding agent" in resolve_system(parse_args(["t"])))
+      "software engineering agent" in resolve_system(parse_args(["t"])))
 
 # --no-color and NO_COLOR
 
@@ -2651,7 +2651,9 @@ from sessions import (search_sessions, rename_session, delete_session,
 save_session("alpha", [{"role": "user", "content": "fix the login bug"},
                        {"role": "assistant", "content": "fixed it"}])
 save_session("beta", [{"role": "user", "content": "write docs"}])
-_hits = search_sessions("login")
+# the default prompt itself mentions "login" (an example), so search a
+# phrase unique to the alpha session
+_hits = search_sessions("login bug")
 check("--search-sessions finds the right session",
       len(_hits) == 1 and _hits[0][0] == "alpha"
       and "login" in _hits[0][1])

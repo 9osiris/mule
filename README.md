@@ -322,7 +322,9 @@ and retries with exponential backoff on 429s and 5xxs. `cost.py`
 holds rough per-model pricing. `sessions.py` saves and resumes
 conversations as jsonl files under `~/.mule/sessions/` and exports
 them to markdown. `checkpoints.py` tars and restores project
-snapshots. `prompt.md` is the system prompt. it tells the model to narrate
+snapshots. `prompt.md` is the system prompt: a 100-section engineering
+playbook (verify before assuming, smallest correct change, test
+everything, disciplined correction). it also tells the model to narrate
 as it goes: one short line before each batch of tool calls, so
 the human can follow along. `repl.py` runs the
 `--interactive` prompt loop, its slash commands, and custom
