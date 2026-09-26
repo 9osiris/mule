@@ -96,6 +96,8 @@ def build_parser(cfg):
     p.add_argument("--print", dest="print_mode", action="store_true",
                    help="print only the final answer, no confirmations, "
                         "for scripting")
+    p.add_argument("--output", metavar="FILE",
+                   help="write the final answer to FILE too")
     return p
 
 
@@ -523,6 +525,20 @@ def main(argv=None):
     if args.json:
         print(json.dumps(build_result(args, messages, totals), indent=2))
         return 0
+
+    if args.output:
+        # write the final answer to a file too, works with --print
+        answer = last_answer(messages)
+        wrote = False
+        try:
+            with open(args.output, "w") as f:
+                f.write(answer + "\n")
+            wrote = True
+        except OSError as e:
+            say(args, "warning: could not write %s: %s"
+                       % (args.output, e))
+        if wrote and not args.print_mode:
+            print("wrote answer to %s" % args.output)
 
     if args.print_mode:
         # scripting mode: just the answer, nothing else

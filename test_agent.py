@@ -1963,6 +1963,23 @@ if _prof_home is None:
 else:
     os.environ["HOME"] = _prof_home
 
+# --output FILE writes the final answer to a file
+
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _FakePrintClient
+_out_root = tempfile.mkdtemp()
+_out_file = os.path.join(_out_root, "ans.txt")
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["do it", "--api-key", "x", "--root", _out_root,
+                          "--output", _out_file])
+_main_mod.ChatClient = _real_client
+check("--output exits 0", _rc == 0)
+check("--output writes the final answer",
+      open(_out_file).read() == "the answer\n")
+check("--output says where it went",
+      "wrote answer to" in _buf.getvalue())
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
