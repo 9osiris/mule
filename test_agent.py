@@ -2921,6 +2921,73 @@ for _cls, _extra, _want, _label in (
 check("successful run still exits 0",
       _main_mod.main(["help", "tools"]) == EXIT_OK)
 
+# --trace: raw request/response pairs as jsonl
+
+
+class _TraceHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        body = json.dumps(
+            {"choices": [{"message": {"role": "assistant",
+                                      "content": "traced"}}],
+             "usage": {"prompt_tokens": 5,
+                       "completion_tokens": 5}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+_trace_file = os.path.join(tempfile.mkdtemp(), "trace.jsonl")
+_tserver = HTTPServer(("127.0.0.1", 0), _TraceHandler)
+threading.Thread(target=_tserver.serve_forever, daemon=True).start()
+_tclient = ChatClient("http://127.0.0.1:%d/v1" % _tserver.server_port,
+                      "secret-key-xyz", "m", trace_file=_trace_file)
+_reply = _tclient.chat([{"role": "user", "content": "hi"}])
+check("traced chat still works", _reply.get("content") == "traced")
+_tlines = open(_trace_file).read().strip().split("\n")
+check("--trace writes one jsonl record per call", len(_tlines) == 1)
+_trec = json.loads(_tlines[0])
+check("--trace record has request and response",
+      _trec["request"]["messages"][0]["content"] == "hi"
+      and _trec["response"]["choices"][0]["message"]["content"] == "traced")
+check("--trace never records the api key",
+      "secret-key-xyz" not in open(_trace_file).read())
+check("--trace parses", parse_args(["t", "--trace", "x"]).trace == "x")
+
+# --log-file: the whole run lands in the file too
+
+
+class _LogClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        return {"role": "assistant", "content": "logged answer",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_log_file = os.path.join(tempfile.mkdtemp(), "run.log")
+_main_mod.ChatClient = _LogClient
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["t", "--api-key", "x", "--root", tempfile.mkdtemp(),
+                          "--print", "--log-file", _log_file])
+_main_mod.ChatClient = _real_client
+check("--log-file mirrors stdout to the file",
+      _rc == 0 and "logged answer" in open(_log_file).read()
+      and "logged answer" in _buf.getvalue())
+check("--log-file parses",
+      parse_args(["t", "--log-file", "x"]).log_file == "x")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

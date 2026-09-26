@@ -167,6 +167,11 @@ def build_parser(cfg):
                         "{{task}} becomes your task text")
     p.add_argument("--import", dest="import_", default=None, metavar="FILE",
                    help="start from a markdown or jsonl history file")
+    p.add_argument("--log-file", default=cfg.get("log_file"),
+                   metavar="FILE",
+                   help="append all output to FILE as well as the terminal")
+    p.add_argument("--trace", default=cfg.get("trace"), metavar="FILE",
+                   help="write raw api request/response pairs to FILE as jsonl")
     return p
 
 
@@ -746,13 +751,52 @@ def resolve_task(args, stdin):
     return task
 
 
+class _Tee:
+    # mirrors everything printed on stdout into a log file,
+    # so --log-file captures the whole run transcript
+    def __init__(self, path):
+        self.file = open(path, "a")
+        self.stdout = sys.stdout
+
+    def write(self, s):
+        self.stdout.write(s)
+        self.file.write(s)
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+    def close(self):
+        try:
+            self.file.close()
+        except OSError:
+            pass
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in SUBCOMMANDS:
         return run_subcommand(argv[0], argv[1:])
     args = parse_args(argv)
     init_color(args.no_color)
+    if not args.log_file:
+        return _run(args)
+    try:
+        tee = _Tee(args.log_file)
+    except OSError as e:
+        print(red("error: cannot open log file: %s" % e),
+              file=sys.stderr)
+        return EXIT_ERROR
+    old_stdout = sys.stdout
+    sys.stdout = tee
+    try:
+        return _run(args)
+    finally:
+        sys.stdout = old_stdout
+        tee.close()
 
+
+def _run(args):
     if args.list_sessions:
         for name in list_sessions():
             print(name)
@@ -822,7 +866,8 @@ def main(argv=None):
     client = ChatClient(args.base_url, args.api_key, args.model,
                         timeout=args.timeout, retries=args.retries,
                         temperature=args.temperature,
-                        max_tokens=args.max_tokens, seed=args.seed)
+                        max_tokens=args.max_tokens, seed=args.seed,
+                        trace_file=args.trace)
     tools.make_chat = lambda: make_chat_fn(args, client)
     system = resolve_system(args)
 
