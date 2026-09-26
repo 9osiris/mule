@@ -1,4 +1,5 @@
 import datetime
+import difflib
 import html
 import os
 import re
@@ -10,6 +11,14 @@ import urllib.request
 MAX_READ = 100_000  # don't dump giant files into context
 MAX_OUTPUT = 20_000
 MAX_FETCH = 200_000  # cap on downloaded pages
+
+
+def make_diff(old, new, path="file"):
+    # unified diff of old -> new, factored out for tests
+    lines = difflib.unified_diff(
+        old.splitlines(), new.splitlines(),
+        fromfile="a/" + path, tofile="b/" + path, lineterm="")
+    return "\n".join(lines)
 
 
 class BackupStore:
@@ -130,14 +139,32 @@ class ToolSet:
             return "nothing to undo"
         return "restored %s" % os.path.relpath(restored, self.root)
 
+    def _confirm_write(self, action, path, old_text, new_text):
+        # in --ask mode, show what the write would change first
+        if not self.confirm:
+            return True
+        prompt = action
+        diff = make_diff(old_text, new_text, path)
+        if diff:
+            prompt += "\n" + diff
+        return self.confirm(prompt)
+
     def write_file(self, path, content=""):
         full = self._resolve(path)
+        content = content or ""
+        old_text = ""
+        if os.path.isfile(full):
+            with open(full, "r", errors="replace") as f:
+                old_text = f.read()
+        if not self._confirm_write("write_file %s" % path, path,
+                                   old_text, content):
+            return "declined: the write was not applied"
         if os.path.isfile(full):
             self.backups.stash(full)
         os.makedirs(os.path.dirname(full) or self.root, exist_ok=True)
         with open(full, "w") as f:
-            f.write(content or "")
-        return "wrote %d bytes to %s" % (len(content or ""), path)
+            f.write(content)
+        return "wrote %d bytes to %s" % (len(content), path)
 
     def edit_file(self, path, old="", new=""):
         # patch one exact string. must match exactly once or it bails
@@ -154,9 +181,13 @@ class ToolSet:
         if count > 1:
             return ("error: old string matches %d times in %s, "
                     "be more specific" % (count, path))
+        new_data = data.replace(old, new or "", 1)
+        if not self._confirm_write("edit_file %s" % path, path,
+                                   data, new_data):
+            return "declined: the edit was not applied"
         self.backups.stash(full)
         with open(full, "w") as f:
-            f.write(data.replace(old, new or "", 1))
+            f.write(new_data)
         return "edited %s" % path
 
     def list_dir(self, path="."):

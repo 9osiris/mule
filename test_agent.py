@@ -715,7 +715,7 @@ check("--retries parses",
 
 # undo: backups before writes and edits, restored lifo
 
-from tools import BackupStore
+from tools import make_diff, BackupStore
 
 uroot = tempfile.mkdtemp()
 utools = ToolSet(uroot)
@@ -748,6 +748,36 @@ check("undo is lifo", open(target).read() == "edited\n")
 utools.undo_last()
 check("second undo restores original",
       open(target).read() == "original\n")
+
+# diff preview in --ask mode
+
+d = make_diff("a\nb\n", "a\nc\n", "f.txt")
+check("diff shows removed and added lines",
+      "-b" in d and "+c" in d and "a/f.txt" in d)
+check("empty diff for identical text", make_diff("x", "x") == "")
+
+prompts = []
+droot = tempfile.mkdtemp()
+dtools = ToolSet(droot, confirm=lambda p: prompts.append(p) or False)
+dtools.backups = BackupStore(backup_dir=tempfile.mkdtemp())
+dtarget = os.path.join(droot, "g.txt")
+open(dtarget, "w").write("old line\n")
+
+r = dtools.call("edit_file", {"path": "g.txt", "old": "old line",
+                              "new": "new line"})
+check("declined edit does not apply", r.startswith("declined:"))
+check("declined edit leaves file alone",
+      open(dtarget).read() == "old line\n")
+check("declined edit stashes nothing", len(dtools.backups.stack) == 0)
+check("confirm got one prompt", len(prompts) == 1)
+check("prompt shows the diff",
+      "-old line" in prompts[0] and "+new line" in prompts[0])
+
+ytools2 = ToolSet(droot, confirm=lambda p: True)
+ytools2.backups = BackupStore(backup_dir=tempfile.mkdtemp())
+r = ytools2.call("write_file", {"path": "g.txt", "content": "ok\n"})
+check("accepted write applies",
+      r.startswith("wrote") and open(dtarget).read() == "ok\n")
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
