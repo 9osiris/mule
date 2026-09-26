@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import urllib.parse
 import urllib.request
@@ -27,6 +28,43 @@ IMAGE_TYPES = {
     ".webp": "image/webp",
 }
 TODO_STATES = ("pending", "in_progress", "done")
+
+# shell commands that are always refused, no matter the mode
+DANGEROUS = [
+    (r">\s*/dev/(sd|hd|nvme|vd)[a-z0-9]*", "writing to a raw disk"),
+    (r"(^|[\s;|&])chmod\s+(-R\s+)?777\s+/\s", "chmod 777 on /"),
+]
+
+# shell commands that need the literal word "yes" typed in --ask
+# mode. without a human at the keyboard they are refused outright.
+CRITICAL = [
+    (r":\(\)\s*\{", "fork bomb"),
+    (r"(^|[\s;|&])mkfs[\s.]", "mkfs"),
+    (r"(^|[\s;|&])dd\s[^|;&]*\bof=/dev/", "dd to a device"),
+    (r"(^|[\s;|&])(sudo\s+)?rm\s+-[a-z]*r[a-z]*\s+/\*?(\s|;|$)",
+     "rm -rf /"),
+]
+
+# file contents that look like credentials. reading them sends
+# them to the model, so the user gets a loud warning first.
+SECRET_PATTERNS = [
+    (r"AKIA[0-9A-Z]{16}", "aws access key"),
+    (r"sk-[A-Za-z0-9]{20,}", "api key"),
+    (r"ghp_[A-Za-z0-9]{36}", "github token"),
+    (r"github_pat_[A-Za-z0-9_]+", "github token"),
+    (r"xox[bap]-[A-Za-z0-9-]+", "slack token"),
+    (r"-----BEGIN [A-Z ]*PRIVATE KEY-----", "private key"),
+    (r"(?i)\b(password|passwd|secret|api[_-]?key)\b\s*[:=]\s*\S{3,}",
+     "hardcoded credential"),
+]
+
+
+def _matches(patterns, text):
+    # the label of the first matching pattern, or None
+    for pattern, label in patterns:
+        if re.search(pattern, text):
+            return label
+    return None
 
 
 def _ddg_results(page, limit=8):
@@ -153,10 +191,15 @@ class BackupStore:
 
 class ToolSet:
     def __init__(self, root, confirm=None, ask=None, make_chat=None,
-                 delegate_depth=0, max_delegates=3):
+                 delegate_depth=0, max_delegates=3, confirm_critical=None,
+                 warn=None):
         self.root = os.path.abspath(root)
         # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
+        # confirm_critical(command) -> bool, needs the literal word "yes"
+        self.confirm_critical = confirm_critical
+        # warn(msg), called when file reads look like secrets
+        self.warn = warn
         # ask(question, options) -> str, the human-in-the-loop for ask_user
         self.ask = ask
         # make_chat() -> chat_fn for delegate subagents, None disables it
@@ -327,7 +370,10 @@ class ToolSet:
                 "function": {
                     "name": name,
                     "description": t["description"],
-                    "parameters": {"type": "object", "properties": props},
+                    # required must be an explicit array: strict
+                    # gateways reject the schema when it is missing
+                    "parameters": {"type": "object", "properties": props,
+                                   "required": list(props)},
                 },
             })
         return out
@@ -364,6 +410,17 @@ class ToolSet:
             raise ValueError("path escapes project root: %s" % path)
         return full
 
+    def _warn_secrets(self, text, label):
+        # file contents go straight to the model, flag credentials loudly
+        kind = _matches(SECRET_PATTERNS, text)
+        if kind:
+            msg = ("warning: %s looks like it contains a %s, "
+                   "it is being sent to the model" % (label, kind))
+            if self.warn:
+                self.warn(msg)
+            else:
+                print(msg, file=sys.stderr)
+
     def read_file(self, path):
         full = self._resolve(path)
         if not os.path.isfile(full):
@@ -372,6 +429,7 @@ class ToolSet:
             data = f.read(MAX_READ + 1)
         if len(data) > MAX_READ:
             data = data[:MAX_READ] + "\n...[truncated]"
+        self._warn_secrets(data, path)
         return data
 
     def undo_last(self):
@@ -447,7 +505,18 @@ class ToolSet:
         return "\n".join(lines) or "(empty)"
 
     def run_shell(self, command, timeout="30", background="false"):
-        if self.confirm and not self.confirm(command):
+        danger = _matches(DANGEROUS, command)
+        if danger:
+            return "refused: looks like %s, not running it" % danger
+        critical = _matches(CRITICAL, command)
+        if critical:
+            # the point of no return: only a typed "yes" runs it
+            if self.confirm_critical and self.confirm_critical(command):
+                pass
+            else:
+                return ("refused: %s needs the literal word 'yes' "
+                        "in --ask mode, not running it" % critical)
+        elif self.confirm and not self.confirm(command):
             return "declined: the command was not run"
         if str(background).lower() in ("true", "1", "yes"):
             jid = self.jobs.start(command)
@@ -696,10 +765,14 @@ class ToolSet:
                                 hits.append("%s:%d: %s"
                                             % (rel, i, line.rstrip()))
                             if len(hits) >= 100:
-                                return "\n".join(hits) + "\n...[truncated]"
+                                out = "\n".join(hits) + "\n...[truncated]"
+                                self._warn_secrets(out, "grep results")
+                                return out
                 except OSError:
                     continue
-        return "\n".join(hits) or "no matches for %r" % pattern
+        out = "\n".join(hits) or "no matches for %r" % pattern
+        self._warn_secrets(out, "grep results")
+        return out
 
     def find(self, pattern="*", path="."):
         # find files by name, glob against the basename
@@ -768,6 +841,7 @@ class ToolSet:
                 data = f.read(MAX_READ + 1)
             if len(data) > MAX_READ:
                 data = data[:MAX_READ] + "\n...[truncated]"
+            self._warn_secrets(data, p)
             parts.append("=== %s ===\n%s" % (p, data))
         return "\n\n".join(parts) or "(no files given)"
 

@@ -141,6 +141,15 @@ check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
       and len(seen["bodies"][0]["tools"]) == 25)
+
+# every tool schema carries an explicit required array:
+# strict gateways reject the schema when it is missing
+req_ok = all(
+    isinstance(t["function"]["parameters"].get("required"), list)
+    and set(t["function"]["parameters"]["required"])
+    == set(t["function"]["parameters"]["properties"])
+    for t in seen["bodies"][0]["tools"])
+check("tool schemas carry an explicit required array", req_ok)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
