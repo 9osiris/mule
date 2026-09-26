@@ -139,6 +139,13 @@ def run_subcommand(name, rest):
                         if o.startswith("--")})
         print(completion_script(rest[0], flags, sorted(PRICING)), end="")
         return 0
+    if name == "models":
+        from cost import PRICING
+        print("%-14s %10s %10s" % ("model", "in $/1M", "out $/1M"))
+        for model in sorted(PRICING):
+            pin, pout = PRICING[model]
+            print("%-14s %10.2f %10.2f" % (model, pin, pout))
+        return 0
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
 

@@ -1537,6 +1537,22 @@ except ValueError:
 check("completion usage errors without a shell",
       run_subcommand("completion", []) == 2)
 
+# mule models
+
+import io
+import contextlib
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    check("models subcommand exits 0", run_subcommand("models", []) == 0)
+_models_out = _buf.getvalue()
+check("models lists priced models",
+      "gpt-4o-mini" in _models_out and "gpt-4o" in _models_out)
+check("models shows in/out pricing",
+      "0.15" in _models_out and "0.60" in _models_out)
+check("models has a header row",
+      "in $/1M" in _models_out and "out $/1M" in _models_out)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
