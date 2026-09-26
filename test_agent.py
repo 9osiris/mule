@@ -2670,28 +2670,21 @@ check("network flags parse",
       and parse_args(["t"]).no_network is False
       and parse_args(["t"]).allow_network is None)
 
-# flags can default from mule.json
-_cfg_home = os.environ.get("HOME")
-os.environ["HOME"] = tempfile.mkdtemp()
-_cfg_dir = tempfile.mkdtemp()
-with open(os.path.join(_cfg_dir, "mule.json"), "w") as _cf:
+# flags can default from mule.json (the suite points config at
+# temp files, see the config tests above)
+_cfg_path = os.path.join(tempfile.mkdtemp(), "mule.json")
+with open(_cfg_path, "w") as _cf:
     json.dump({"ask": True, "readonly": True, "max_tools": 7,
                "allow_tools": "read_file"}, _cf)
-_old_cwd = os.getcwd()
-os.chdir(_cfg_dir)
+config.HOME_CONFIG = "/nonexistent/mule.json"
+config.LOCAL_CONFIG = _cfg_path
 _cfg_args = parse_args(["t"])
-os.chdir(_old_cwd)
 check("config file sets flag defaults",
       _cfg_args.ask is True and _cfg_args.readonly is True
       and _cfg_args.max_tools == 7 and _cfg_args.allow_tools == "read_file")
-os.chdir(_cfg_dir)
-_cli_wins = parse_args(["t", "--max-tools", "3"])
-os.chdir(_old_cwd)
-check("cli flags beat config defaults", _cli_wins.max_tools == 3)
-if _cfg_home is None:
-    os.environ.pop("HOME", None)
-else:
-    os.environ["HOME"] = _cfg_home
+check("cli flags beat config defaults",
+      parse_args(["t", "--max-tools", "3"]).max_tools == 3)
+config.LOCAL_CONFIG = "/nonexistent/mule.json"
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
