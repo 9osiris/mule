@@ -19,7 +19,8 @@ from sessions import save_session, load_session, list_sessions, auto_name, \
     latest_session, search_sessions, rename_session, delete_session, \
     session_stats
 from tools import ToolSet
-from ui import init_color, red, yellow
+from ui import init_color, red, yellow, banner_text, tool_panel, \
+    status_footer, Spinner
 
 
 def _num(env_raw, cfg_raw, default, cast):
@@ -546,7 +547,30 @@ def make_chat_fn(args, client):
         # stream tokens live unless --no-stream was passed.
         # --print stays silent, it only wants the final answer.
         if args.no_stream or getattr(args, "print_mode", False):
-            return _once(client.chat, messages, tools, stop=stop)
+            if getattr(args, "print_mode", False) or args.quiet or args.json:
+                return _once(client.chat, messages, tools, stop=stop)
+            # waiting on the model: tick the spinner meanwhile.
+            # silent unless stdout is a real terminal.
+            import threading
+            box = {}
+
+            def _call():
+                try:
+                    box["reply"] = _once(client.chat, messages, tools,
+                                         stop=stop)
+                except Exception as e:
+                    box["error"] = e
+
+            t = threading.Thread(target=_call, daemon=True)
+            t.start()
+            spin = Spinner("thinking")
+            while t.is_alive():
+                spin.tick()
+                t.join(0.1)
+            spin.done()
+            if "error" in box:
+                raise box["error"]
+            return box["reply"]
         printed = []
 
         def on_token(t):
@@ -601,7 +625,7 @@ def make_show(args):
         for c in calls:
             a = json.loads(c["function"].get("arguments") or "{}")
             summary = " ".join("%s=%s" % (k, str(v)[:60]) for k, v in a.items())
-            print("$ %s %s" % (c["function"]["name"], summary))
+            print(tool_panel(c["function"]["name"], summary))
     return show
 
 
@@ -936,6 +960,9 @@ def _run(args):
         print(red("set OPENAI_API_KEY or pass --api-key"), file=sys.stderr)
         return 2
 
+    if not args.quiet and not args.json and not args.print_mode:
+        print(banner_text(__version__, args.model))
+
     client = ChatClient(args.base_url, args.api_key, args.model,
                         timeout=args.timeout, retries=args.retries,
                         temperature=args.temperature,
@@ -1093,8 +1120,10 @@ def _run(args):
         return exit_code
 
     if not args.quiet:
-        print("---")
-        print(cost_line)
+        print(status_footer(__version__, used_model, totals["in"],
+                            totals["out"],
+                            fmt_cost(cost_for(used_model, totals["in"],
+                                             totals["out"]))))
     print(last_answer(messages))
     return exit_code
 

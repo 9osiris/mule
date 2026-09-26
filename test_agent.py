@@ -3127,6 +3127,69 @@ _bug_out2 = []
 handle_slash("/bug", {"write": _bug_out2.append, "version": "0.9.0"})
 check("/bug defaults the title", "title=bug%20report" in _bug_out2[0])
 
+# branding: banner, panels, footer, spinner
+
+import ui as ui_mod
+from ui import banner_text, tool_panel, status_footer, Spinner, brand, \
+    SPINNER_FRAMES
+
+check("banner carries the mule head",
+      "\\__/" in banner_text("0.9.0", "m")
+      and "mule 0.9.0 - model m" in banner_text("0.9.0", "m"))
+check("spinner frames are four distinct custom frames",
+      len(SPINNER_FRAMES) == 4 and len(set(SPINNER_FRAMES)) == 4)
+
+_old_no_color = os.environ.pop("NO_COLOR", None)
+ui_mod.init_color(True)
+check("brand is plain with --no-color", brand("x") == "x")
+check("panels are plain with --no-color",
+      tool_panel("n", "s") == "┌─ n\n│ s\n└─")
+check("footer is plain with --no-color",
+      status_footer("0.9.0", "m", 1234, 567, "$0.01")
+      == "─" * 40 + "\nmule 0.9.0 | model m | 1,234 in / 567 out | $0.01")
+ui_mod.init_color(False)
+_on_wrapped = brand("x") != "x" and "1;33" in brand("x")
+if _old_no_color is not None:
+    os.environ["NO_COLOR"] = _old_no_color
+ui_mod.init_color(bool(_old_no_color))
+check("brand wraps in amber with color on", _on_wrapped)
+
+_spin = Spinner("thinking")
+_spin.tick()
+_spin.done()
+check("spinner is safe off-terminal", True)
+
+from main import make_show
+
+_show = make_show(parse_args(["t"]))
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _show(1, [{"id": "1",
+               "function": {"name": "run_shell",
+                            "arguments": '{"command": "echo hi"}'}}])
+check("tool calls render as panels",
+      "run_shell" in _buf.getvalue()
+      and "command=echo hi" in _buf.getvalue()
+      and "┌─" in _buf.getvalue())
+
+_main_mod.ChatClient = _LogClient
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _main_mod.main(["t", "--api-key", "x", "--root", tempfile.mkdtemp(),
+                    "--print"])
+check("--print stays banner-free",
+      "mule 0.9.0 - model" not in _buf.getvalue())
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    with contextlib.redirect_stderr(io.StringIO()):
+        _rc = _main_mod.main(["t", "--api-key", "x",
+                              "--root", tempfile.mkdtemp()])
+_main_mod.ChatClient = _real_client
+check("normal runs show the banner",
+      _rc == 0 and "mule 0.9.0 - model" in _buf.getvalue())
+check("normal runs end with the status footer",
+      "| 1 in / 1 out |" in _buf.getvalue())
+
 _demo_msg = _main_mod._demo_message({"messages": []})
 check("demo model lists the dir first",
       _demo_msg["tool_calls"][0]["function"]["name"] == "list_dir")
