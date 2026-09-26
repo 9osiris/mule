@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 7)
+      and len(seen["bodies"][0]["tools"]) == 9)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -1051,6 +1051,136 @@ check("a second revise counts as a reject",
       wok is False and wchat.n == 2)
 
 check("--plan parses", parse_args(["--plan", "t"]).plan is True)
+
+# todo tools: write, read, progress lines through the loop
+
+ttools = ToolSet(tempfile.mkdtemp())
+check("empty todos read", ttools.call("todo_read", {}) == "(no todos)")
+check("empty todos give no progress line",
+      ttools.progress_line() is None)
+
+r = ttools.call("todo_write", {"todos": json.dumps([
+    {"text": "write code", "status": "done"},
+    {"text": "write tests", "status": "in_progress"},
+    {"text": "ship it", "status": "pending"},
+])})
+check("todo_write returns the progress line", r == "[1/3] write tests")
+check("progress line counts done", ttools.progress_line() == "[1/3] write tests")
+read = ttools.call("todo_read", {})
+check("todo_read marks each state",
+      "[x] write code" in read and "[>] write tests" in read
+      and "[ ] ship it" in read)
+check("todo_write rejects bad json",
+      ttools.call("todo_write", {"todos": "nope"}).startswith("error:"))
+check("todo_write rejects a bad status",
+      ttools.call("todo_write", {"todos": json.dumps(
+          [{"text": "x", "status": "bogus"}])}).startswith("error:"))
+check("todo_write rejects a missing text",
+      ttools.call("todo_write", {"todos": json.dumps(
+          [{"status": "done"}])}).startswith("error:"))
+check("todo_write defaults status to pending",
+      ttools.call("todo_write", {"todos": json.dumps(
+          [{"text": "x"}])}) == "[0/1] x")
+r = ttools.call("todo_write", {"todos": "[]"})
+check("clearing todos", r == "todo list cleared"
+      and ttools.progress_line() is None)
+
+# the loop renders a progress line whenever todos change
+
+tscript = [
+    {"role": "assistant", "tool_calls": [tool_call("t1", "todo_write",
+            {"todos": json.dumps([{"text": "a", "status": "in_progress"},
+                                   {"text": "b", "status": "pending"}])})]},
+    {"role": "assistant", "tool_calls": [tool_call("t2", "todo_write",
+            {"todos": json.dumps([{"text": "a", "status": "done"},
+                                   {"text": "b", "status": "in_progress"}])})]},
+    {"role": "assistant", "tool_calls": [tool_call("t3", "todo_write",
+            {"todos": json.dumps([{"text": "a", "status": "done"},
+                                   {"text": "b", "status": "done"}])})]},
+    {"role": "assistant", "content": "all done"},
+]
+tstate = {"n": 0}
+
+
+def tchat(messages, tools):
+    reply = tscript[tstate["n"]]
+    tstate["n"] += 1
+    return reply
+
+
+tt = ToolSet(tempfile.mkdtemp())
+seen_todos = []
+tmsgs = run("do a and b", tchat, tt, system_prompt="t", max_steps=10,
+            on_todos=seen_todos.append)
+check("loop renders todo progress when it changes",
+      seen_todos == ["[0/2] a", "[1/2] b", "[2/2] all done"])
+check("loop finishes after todos",
+      last_answer(tmsgs) == "all done")
+
+# context auto-compaction: fat history gets squashed, tail survives
+
+check("context_size counts chars",
+      context_size([{"role": "user", "content": "abc"}]) > 10)
+
+fat = [{"role": "system", "content": "sys"}]
+for i in range(30):
+    fat.append({"role": "user", "content": "task %d: %s" % (i, "x" * 200)})
+    fat.append({"role": "assistant", "content": "answer %d: %s" % (i, "y" * 200)})
+
+
+def cchat(messages, tools):
+    cchat.n += 1
+    if not tools:
+        # the summarization call
+        cchat.summaries.append(messages)
+        return {"role": "assistant",
+                "content": "did stuff, then more stuff"}
+    return {"role": "assistant", "content": "final answer"}
+cchat.n = 0
+cchat.summaries = []
+
+before = len(fat)
+cmsgs = run(None, cchat, ToolSet(tempfile.mkdtemp()), messages=fat,
+            max_steps=2, context_budget=1000)
+check("compaction shrank the history", len(cmsgs) < before)
+check("a summary message exists",
+      any("[earlier context summarized]" in (m.get("content") or "")
+          for m in cmsgs))
+check("the summary text landed",
+      any("did stuff, then more stuff" in (m.get("content") or "")
+          for m in cmsgs))
+check("system prompt survived",
+      cmsgs[0] == {"role": "system", "content": "sys"})
+check("recent tail kept",
+      any("task 29" in (m.get("content") or "") for m in cmsgs))
+check("summarizer got the old messages",
+      len(cchat.summaries) == 1
+      and "task 0" in json.dumps(cchat.summaries[0]))
+check("loop finished after compaction",
+      last_answer(cmsgs) == "final answer")
+
+
+def nchat(messages, tools):
+    nchat.n += 1
+    assert tools, "summarizer should not run under budget"
+    return {"role": "assistant", "content": "fine"}
+nchat.n = 0
+
+nmsgs = run("small task", nchat, ToolSet(tempfile.mkdtemp()),
+            system_prompt="t", max_steps=2, context_budget=100000)
+check("no compaction under budget",
+      nchat.n == 1 and last_answer(nmsgs) == "fine")
+
+# compact_messages leaves a short history alone
+short = [{"role": "system", "content": "s"},
+         {"role": "user", "content": "hi"}]
+check("short history untouched",
+      compact_messages(short, cchat) == short)
+
+check("--context-budget parses",
+      parse_args(["t", "--context-budget", "5000"]).context_budget == 5000)
+check("--context-budget defaults to 100k",
+      parse_args(["t"]).context_budget == 100000)
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
