@@ -23,16 +23,6 @@ python main.py "summarize the repo layout" \
   --root ./myproject
 ```
 
-agentrouter works too (mule sends the client headers its waf wants):
-
-```bash
-python main.py "check this for errors" \
-  --base-url https://agentrouter.org/v1 \
-  --api-key $AGENTROUTER_API_KEY \
-  --model gpt-4o-mini \
-  --root ./myproject
-```
-
 ## flags
 
 - `task` - what to do (or pipe it on stdin)
@@ -393,15 +383,6 @@ on top of that:
 `0` the run finished, `2` the cost budget was hit (or you misused a
 flag), `3` something failed at runtime, `130` you pressed ctrl-c.
 script against them: `mule --print "task" || echo "failed: $?"`.
-
-## the look
-
-mule has a face: a geometric mule head in bold amber opens every
-run, tool calls render as bordered panels, a spinner ticks while
-the model thinks, and a footer closes the run with the model,
-token counts, and cost. full spec in `BRANDING.md`. `--no-color`
-(or the `NO_COLOR` env var) turns all of it off; `--print`,
-`--json`, and `--quiet` never show it in the first place.
 
 ## tests
 
