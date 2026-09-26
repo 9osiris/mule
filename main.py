@@ -158,6 +158,11 @@ def build_parser(cfg):
                    action="store_true",
                    default=cfg.get("no_network", False),
                    help="disable fetch_url, web_search, and http_post")
+    p.add_argument("--template", default=None, metavar="NAME",
+                   help="run the task through .mule/templates/NAME.md, "
+                        "{{task}} becomes your task text")
+    p.add_argument("--import", dest="import_", default=None, metavar="FILE",
+                   help="start from a markdown or jsonl history file")
     return p
 
 
@@ -423,6 +428,18 @@ def apply_tool_gates(args, tools):
         for name in list(tools.tools):
             if name not in allowed:
                 tools.disable_tool(name)
+
+
+def load_template(root, name):
+    # .mule/templates/NAME.md under the project root
+    filename = name if name.endswith(".md") else name + ".md"
+    path = os.path.join(os.path.abspath(root), ".mule", "templates",
+                        filename)
+    if not os.path.isfile(path):
+        raise ValueError("no such template: %s (looked in %s)"
+                         % (name, os.path.dirname(path)))
+    with open(path) as f:
+        return f.read()
 
 
 def make_chat_fn(args, client):
@@ -781,7 +798,16 @@ def main(argv=None):
             say(args, "checkpoint saved: %s" % path)
 
     task = resolve_task(args, sys.stdin)
-    if not task and not args.resume and not args.cont and not args.interactive:
+    if args.template:
+        # the template wraps the task: {{task}} becomes the task text
+        try:
+            task = load_template(args.root, args.template).replace(
+                "{{task}}", task or "")
+        except ValueError as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return 1
+    if not task and not args.resume and not args.cont and not args.interactive \
+            and not args.import_:
         print(red("give it a task, as an argument or on stdin"),
               file=sys.stderr)
         return 2

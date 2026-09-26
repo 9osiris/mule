@@ -1396,7 +1396,12 @@ except FileExistsError:
     check("init refuses to overwrite", True)
 
 created2 = init_project(initroot, force=True)
-check("init --force overwrites", len(created2) == 3)
+check("init --force overwrites", len(created2) == 4)
+check("init creates an example template",
+      os.path.isfile(os.path.join(initroot, ".mule", "templates",
+                                  "review.md"))
+      and "{{task}}" in open(os.path.join(
+          initroot, ".mule", "templates", "review.md")).read())
 
 # mule config from the cli
 
@@ -2751,6 +2756,58 @@ with contextlib.redirect_stdout(_buf2):
     _r2 = cmd_examples()
 check("mule help examples matches mule examples",
       _r1 == _r2 == 0 and _buf1.getvalue() == _buf2.getvalue())
+
+# --template NAME with {{task}} substitution
+
+from main import load_template
+
+_tpl_root = tempfile.mkdtemp()
+_tpl_dir = os.path.join(_tpl_root, ".mule", "templates")
+os.makedirs(_tpl_dir)
+with open(os.path.join(_tpl_dir, "review.md"), "w") as _tf:
+    _tf.write("review this:\n\n{{task}}\n\nbe blunt.")
+check("load_template reads the file",
+      load_template(_tpl_root, "review") == "review this:\n\n{{task}}\n\nbe blunt.")
+check("load_template accepts the .md suffix",
+      load_template(_tpl_root, "review.md").startswith("review this:"))
+try:
+    load_template(_tpl_root, "nope")
+    _tpl_missing = False
+except ValueError as _e:
+    _tpl_missing = "no such template" in str(_e)
+check("load_template errors on missing names", _tpl_missing)
+check("{{task}} substitution works",
+      load_template(_tpl_root, "review").replace("{{task}}", "main.py")
+      == "review this:\n\nmain.py\n\nbe blunt.")
+check("--template parses",
+      parse_args(["t", "--template", "review"]).template == "review")
+
+# --template end to end: the model sees the wrapped task
+_seen_task = {}
+
+
+class _TplClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        _seen_task["task"] = messages[-1]["content"]
+        return {"role": "assistant", "content": "done",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _TplClient
+with contextlib.redirect_stdout(io.StringIO()):
+    _rc = _main_mod.main(["main.py", "--template", "review", "--api-key", "x",
+                          "--root", _tpl_root, "--print"])
+_main_mod.ChatClient = _real_client
+check("--template wraps the task end to end",
+      _rc == 0
+      and _seen_task["task"].startswith("review this:\n\nmain.py\n\nbe blunt."))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

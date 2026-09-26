@@ -19,6 +19,16 @@ that changed, point out anything that looks like a bug, and suggest
 one concrete improvement.
 """
 
+EXAMPLE_TEMPLATE = """you are doing a focused code review. be blunt and specific.
+
+task: {{task}}
+
+read the relevant files first, then report:
+1. bugs you can see
+2. the single most important fix
+3. one style nit, at most
+"""
+
 
 def init_project(target=".", force=False):
     """write mule.json, prompt.md, and .mule/commands/. returns the
@@ -37,9 +47,12 @@ def init_project(target=".", force=False):
     os.makedirs(target, exist_ok=True)
     commands_dir = os.path.join(target, ".mule", "commands")
     os.makedirs(commands_dir, exist_ok=True)
+    templates_dir = os.path.join(target, ".mule", "templates")
+    os.makedirs(templates_dir, exist_ok=True)
 
     write(os.path.join(target, "mule.json"),
           json.dumps(STARTER_CONFIG, indent=2) + "\n")
     write(os.path.join(target, "prompt.md"), PROMPT_TEMPLATE)
     write(os.path.join(commands_dir, "review.md"), EXAMPLE_COMMAND)
+    write(os.path.join(templates_dir, "review.md"), EXAMPLE_TEMPLATE)
     return created
