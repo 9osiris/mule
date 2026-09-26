@@ -11,6 +11,28 @@ import urllib.request
 MAX_READ = 100_000  # don't dump giant files into context
 MAX_OUTPUT = 20_000
 MAX_FETCH = 200_000  # cap on downloaded pages
+DDG_LITE = "https://lite.duckduckgo.com/lite/"
+
+
+def _ddg_results(page, limit=8):
+    # parse duckduckgo lite html into (title, url, snippet) tuples
+    links = re.findall(
+        r'<a rel="nofollow"\s+href="([^"]+)"\s+class=\'result-link\'>'
+        r"(.*?)</a>",
+        page, re.S)
+    snips = re.findall(r"class='result-snippet'>(.*?)</td>", page, re.S)
+    out = []
+    for i, (href, title) in enumerate(links[:limit]):
+        url = href
+        m = re.search(r"[?&]uddg=([^&]+)", href)
+        if m:
+            url = urllib.parse.unquote(m.group(1))
+        snippet = ""
+        if i < len(snips):
+            snippet = re.sub(r"\s+", " ", snips[i]).strip()
+        out.append((html.unescape(title.strip()), url,
+                    html.unescape(snippet)))
+    return out
 
 
 def make_diff(old, new, path="file"):
@@ -86,6 +108,12 @@ class ToolSet:
                 "description": "fetch a web page, returns the text with html stripped",
                 "parameters": {"url": "http or https url"},
                 "run": self.fetch_url,
+            },
+            "web_search": {
+                "description": "search the web, returns titles, urls, and snippets",
+                "parameters": {"query": "what to search for",
+                               "count": "how many results, default 5"},
+                "run": self.web_search,
             },
         }
 
@@ -246,3 +274,30 @@ class ToolSet:
         text = html.unescape(text)
         text = re.sub(r"\s+", " ", text).strip()
         return text or "(empty page)"
+
+    def web_search(self, query="", count="5"):
+        # duckduckgo lite search, returns titles, urls, and snippets
+        if not query:
+            return "error: empty query"
+        try:
+            n = max(1, min(int(count), 10))
+        except (TypeError, ValueError):
+            n = 5
+        url = DDG_LITE + "?q=" + urllib.parse.quote_plus(query)
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "mule/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                page = resp.read(MAX_FETCH).decode("utf-8",
+                                                   errors="replace")
+        except Exception as e:
+            return "error: search failed: %s" % e
+        results = _ddg_results(page, n)
+        if not results:
+            return "no results for %r" % query
+        lines = []
+        for i, (title, link, snippet) in enumerate(results, 1):
+            lines.append("%d. %s\n   %s" % (i, title, link))
+            if snippet:
+                lines.append("   %s" % snippet)
+        return "\n".join(lines)

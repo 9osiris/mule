@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 6)
+      and len(seen["bodies"][0]["tools"]) == 7)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -778,6 +778,75 @@ ytools2.backups = BackupStore(backup_dir=tempfile.mkdtemp())
 r = ytools2.call("write_file", {"path": "g.txt", "content": "ok\n"})
 check("accepted write applies",
       r.startswith("wrote") and open(dtarget).read() == "ok\n")
+
+# web_search: duckduckgo lite parsing, against a fake server
+
+import tools as tools_mod
+from tools import _ddg_results
+
+ddg_page = """
+<html><body>
+<table>
+<tr><td>1.</td><td>
+<a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&amp;rut=abc"
+ class='result-link'>First Result</a>
+</td></tr>
+<tr><td>&nbsp;</td>
+<td class='result-snippet'>
+  the first snippet, with words.
+</td></tr>
+<tr><td>2.</td><td>
+<a rel="nofollow" href="//duckduckgo.com/l/?uddg=http%3A%2F%2Fplain.org%2F&amp;rut=def"
+ class='result-link'>Second &amp; Result</a>
+</td></tr>
+<tr><td>&nbsp;</td>
+<td class='result-snippet'>
+  second snippet here.
+</td></tr>
+</table>
+</body></html>
+"""
+
+parsed = _ddg_results(ddg_page, 8)
+check("parsed two results", len(parsed) == 2)
+check("title unescaped", parsed[1][0] == "Second & Result")
+check("uddg url decoded", parsed[0][1] == "https://example.com/a")
+check("plain url decoded", parsed[1][1] == "http://plain.org/")
+check("snippet text cleaned",
+      parsed[0][2] == "the first snippet, with words.")
+check("limit respected", len(_ddg_results(ddg_page, 1)) == 1)
+
+
+class SearchHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = ddg_page.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+sserver = HTTPServer(("127.0.0.1", 0), SearchHandler)
+threading.Thread(target=sserver.serve_forever, daemon=True).start()
+real_ddg = tools_mod.DDG_LITE
+tools_mod.DDG_LITE = ("http://127.0.0.1:%d/lite/"
+                      % sserver.server_port)
+stools = ToolSet(tempfile.mkdtemp())
+out = stools.call("web_search", {"query": "fake", "count": "5"})
+tools_mod.DDG_LITE = real_ddg
+sserver.shutdown()
+check("search returns titles", "First Result" in out)
+check("search returns urls", "https://example.com/a" in out)
+check("search returns snippets", "the first snippet" in out)
+check("search numbers results", out.startswith("1. "))
+check("empty query errors",
+      "error" in stools.call("web_search", {"query": ""}))
+names = [t["function"]["name"] for t in stools.schemas()]
+check("web_search registered", "web_search" in names)
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

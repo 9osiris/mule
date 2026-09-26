@@ -4,6 +4,9 @@ run shell commands, and fetch web pages.
 All paths are relative to the project root. Use them for everything.
 fetch_url takes an http(s) url and returns the page as rough text,
 html stripped. Use it when you need docs or reference material.
+web_search takes a query and returns titles, urls, and snippets from
+duckduckgo. Use it to look things up, then fetch_url the hits that
+look promising.
 
 Rules:
 - Read before you change. Look at the files involved first.
