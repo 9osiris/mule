@@ -1926,6 +1926,43 @@ check("--print prints only the final answer",
       _buf.getvalue() == "the answer\n")
 check("--print parses", parse_args(["t", "--print"]).print_mode is True)
 
+# profiles: ~/.mule/profiles/NAME.json merged over config
+
+from config import load_profile, list_profiles
+
+_prof_home = os.environ.get("HOME")
+os.environ["HOME"] = tempfile.mkdtemp()
+_pdir = os.path.join(os.environ["HOME"], ".mule", "profiles")
+os.makedirs(_pdir)
+with open(os.path.join(_pdir, "work.json"), "w") as f:
+    json.dump({"model": "gpt-4o", "max_steps": 5}, f)
+check("load_profile reads the file",
+      load_profile("work") == {"model": "gpt-4o", "max_steps": 5})
+check("list_profiles finds it", list_profiles() == ["work"])
+try:
+    load_profile("nope")
+    _pok = False
+except ValueError as e:
+    _pok = "available: work" in str(e)
+check("missing profile errors with available list", _pok)
+with open(os.path.join(_pdir, "bad.json"), "w") as f:
+    f.write("{not json")
+try:
+    load_profile("bad")
+    _bok = False
+except ValueError as e:
+    _bok = "not valid json" in str(e)
+check("bad json profile errors cleanly", _bok)
+_pargs = parse_args(["--profile", "work", "t"])
+check("profile sets the model", _pargs.model == "gpt-4o")
+check("profile sets max_steps", _pargs.max_steps == 5)
+_pargs2 = parse_args(["--profile", "work", "--model", "mini", "t"])
+check("cli flag beats profile", _pargs2.model == "mini")
+if _prof_home is None:
+    os.environ.pop("HOME", None)
+else:
+    os.environ["HOME"] = _prof_home
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

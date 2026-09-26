@@ -74,3 +74,31 @@ def config_unset(key, global_=False):
     data = config_list(global_)
     data.pop(key, None)
     _write(config_path(global_), data)
+
+
+def profile_dir():
+    d = os.path.join(os.path.expanduser("~"), ".mule", "profiles")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def list_profiles():
+    d = profile_dir()
+    return sorted(f[:-5] for f in os.listdir(d) if f.endswith(".json"))
+
+
+def load_profile(name):
+    # ~/.mule/profiles/NAME.json, merged over config, under cli flags
+    path = os.path.join(profile_dir(), name + ".json")
+    if not os.path.isfile(path):
+        avail = list_profiles()
+        hint = ", ".join(avail) if avail else "(none yet)"
+        raise ValueError("no such profile: %s. available: %s" % (name, hint))
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except ValueError:
+        raise ValueError("profile %s is not valid json" % name)
+    if not isinstance(data, dict):
+        raise ValueError("profile %s must be a json object" % name)
+    return {k: data[k] for k in KEYS if k in data}

@@ -5,7 +5,7 @@ import sys
 
 from agent import run, last_answer, load_system_prompt, plan_and_approve
 from client import ChatClient
-from config import load_config
+from config import load_config, load_profile
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name
@@ -101,7 +101,19 @@ def build_parser(cfg):
 
 def parse_args(argv=None):
     cfg = load_config()
-    return build_parser(cfg).parse_args(argv)
+    # --profile has to win before the real parse, so flags can beat it
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--profile", default=None)
+    known, _ = pre.parse_known_args(argv)
+    if known.profile:
+        try:
+            cfg.update(load_profile(known.profile))
+        except ValueError as e:
+            pre.error(str(e))
+    parser = build_parser(cfg)
+    parser.add_argument("--profile", default=known.profile,
+                        help="use a saved profile from ~/.mule/profiles/")
+    return parser.parse_args(argv)
 
 
 SUBCOMMANDS = ("init", "config", "doctor", "completion", "models")
