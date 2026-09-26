@@ -276,6 +276,10 @@ check("session roundtrips", sessions.load_session("demo") == hist)
 check("session listed", "demo" in sessions.list_sessions())
 check("auto name looks right",
       sessions.auto_name().startswith("session-"))
+_taken = sessions.auto_name()
+sessions.save_session(_taken, hist)
+check("auto_name skips names already taken",
+      sessions.auto_name() != _taken)
 try:
     sessions.load_session("nope")
     check("missing session raises", False)

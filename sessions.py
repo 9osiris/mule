@@ -17,7 +17,13 @@ def _path(name):
 
 
 def auto_name():
-    return "session-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    # timestamp name, with a counter when two runs share a second
+    base = "session-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    name, i = base, 2
+    while os.path.isfile(_path(name)):
+        name = "%s-%d" % (base, i)
+        i += 1
+    return name
 
 
 def save_session(name, messages):
