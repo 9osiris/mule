@@ -1,6 +1,7 @@
 """no api key needed. fake model + fake openai server."""
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -139,13 +140,54 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 15)
+      and len(seen["bodies"][0]["tools"]) == 25)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
       open(os.path.join(root2, "srv.txt")).read() == "via server")
 check("final answer came back",
       last_answer(msgs) == "wrote it through the server")
+
+# agentrouter compat headers: sent only when the base url points at it
+
+seen_heads = []
+
+
+class HeadHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        seen_heads.append(dict(self.headers))
+        data = json.dumps({"choices": [{"message": {
+            "role": "assistant", "content": "hi"}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+hserver = HTTPServer(("127.0.0.1", 0), HeadHandler)
+threading.Thread(target=hserver.serve_forever, daemon=True).start()
+hbase = "http://127.0.0.1:%d" % hserver.server_port
+
+ar_client = ChatClient(hbase + "/agentrouter.org/v1", "k", "m")
+ar_client.chat([{"role": "user", "content": "hi"}])
+ar_heads = seen_heads[-1]
+check("agentrouter base url sends originator header",
+      ar_heads.get("Originator") == "codex_cli_rs")
+check("agentrouter base url sends version header",
+      ar_heads.get("Version") == "0.101.0")
+check("agentrouter base url spoofs user agent",
+      (ar_heads.get("User-Agent") or "").startswith("codex_cli_rs"))
+
+plain_client = ChatClient(hbase + "/v1", "k", "m")
+plain_client.chat([{"role": "user", "content": "hi"}])
+plain_heads = seen_heads[-1]
+check("other base urls do not send originator header",
+      "Originator" not in plain_heads)
+hserver.shutdown()
 
 # edit_file: patch one exact string
 
@@ -253,6 +295,8 @@ check("tool result fed back after streamed call",
 # --no-stream flag parsing
 
 from main import parse_args, ask_cmd, build_parser, run_subcommand
+from main import EXIT_OK, EXIT_BUDGET, EXIT_ERROR, EXIT_CANCELLED
+from config import validate_config, config_problems
 check("--no-stream defaults off",
       parse_args(["do things"]).no_stream is False)
 check("--no-stream flag turns on",
@@ -275,6 +319,10 @@ check("session roundtrips", sessions.load_session("demo") == hist)
 check("session listed", "demo" in sessions.list_sessions())
 check("auto name looks right",
       sessions.auto_name().startswith("session-"))
+_taken = sessions.auto_name()
+sessions.save_session(_taken, hist)
+check("auto_name skips names already taken",
+      sessions.auto_name() != _taken)
 try:
     sessions.load_session("nope")
     check("missing session raises", False)
@@ -1390,7 +1438,12 @@ except FileExistsError:
     check("init refuses to overwrite", True)
 
 created2 = init_project(initroot, force=True)
-check("init --force overwrites", len(created2) == 3)
+check("init --force overwrites", len(created2) == 4)
+check("init creates an example template",
+      os.path.isfile(os.path.join(initroot, ".mule", "templates",
+                                  "review.md"))
+      and "{{task}}" in open(os.path.join(
+          initroot, ".mule", "templates", "review.md")).read())
 
 # mule config from the cli
 
@@ -1436,7 +1489,7 @@ check("cli config --global get works",
 check("cli config bad action errors",
       cmd_config(["frobnicate"]) == 2)
 check("cli config unknown key errors",
-      cmd_config(["set", "nope", "x"]) == 1)
+      cmd_config(["set", "nope", "x"]) == EXIT_ERROR)
 
 config_mod.HOME_CONFIG = _orig_home
 config_mod.LOCAL_CONFIG = _orig_local
@@ -1903,11 +1956,11 @@ class _FakePrintClient:
     def __init__(self, *a, **k):
         pass
 
-    def chat(self, messages, tools):
+    def chat(self, messages, tools, stop=None):
         return {"role": "assistant", "content": "the answer",
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    def chat_stream(self, messages, tools, on_token=None):
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
         if on_token:
             on_token("SHOULD NOT PRINT")
         return self.chat(messages, tools)
@@ -2050,6 +2103,1149 @@ if _cont_home is None:
     os.environ.pop("HOME", None)
 else:
     os.environ["HOME"] = _cont_home
+
+# --- batch A: agent loop upgrades ---
+
+# --max-tools stops the loop after N tool executions
+
+_mt_root = tempfile.mkdtemp()
+_mt_tools = ToolSet(_mt_root)
+_mt_calls = {"n": 0}
+
+
+def _mt_chat(messages, tools):
+    _mt_calls["n"] += 1
+    return {"role": "assistant",
+            "tool_calls": [tool_call("c%d" % _mt_calls["n"], "list_dir",
+                                     {"path": "."})]}
+
+
+_mt_msgs = run("list stuff", _mt_chat, _mt_tools, system_prompt="t",
+               max_steps=10, max_tools=2)
+check("--max-tools stops the loop",
+      last_answer(_mt_msgs) == "stopped: hit max tools (2)")
+check("--max-tools consulted the model once more, then stopped",
+      _mt_calls["n"] == 3)
+
+# --time-limit stops a run that takes too long
+
+_tl_msgs = run("slow", _mt_chat, _mt_tools, system_prompt="t",
+               max_steps=10, time_limit=0)
+check("--time-limit stops immediately when already exceeded",
+      last_answer(_tl_msgs).startswith("stopped: hit time limit"))
+
+# on_timing reports per-step durations for --verbose
+
+_timings = []
+_vt_calls = {"n": 0}
+
+
+def _vt_chat(messages, tools):
+    _vt_calls["n"] += 1
+    if _vt_calls["n"] < 3:
+        return {"role": "assistant",
+                "tool_calls": [tool_call("c", "list_dir", {"path": "."})]}
+    return {"role": "assistant", "content": "done"}
+
+
+run("t", _vt_chat, ToolSet(tempfile.mkdtemp()), system_prompt="t",
+    on_timing=lambda s, d: _timings.append((s, d)))
+check("--verbose timing fires per chat call",
+      len(_timings) == 3 and all(d >= 0 for _, d in _timings))
+check("--verbose timing numbers the steps",
+      [s for s, _ in _timings] == [1, 2, 3])
+
+# --parallel-tools runs one turn's calls concurrently, ordered results
+
+_pt_root = tempfile.mkdtemp()
+for _fn, _c in (("a.txt", "aaa"), ("b.txt", "bbb"), ("c.txt", "ccc")):
+    open(os.path.join(_pt_root, _fn), "w").write(_c)
+_pt_tools = ToolSet(_pt_root)
+
+
+def _pt_chat(messages, tools):
+    if len(messages) == 2:
+        return {"role": "assistant", "tool_calls": [
+            tool_call("1", "read_file", {"path": "a.txt"}),
+            tool_call("2", "read_file", {"path": "b.txt"}),
+            tool_call("3", "read_file", {"path": "c.txt"})]}
+    return {"role": "assistant", "content": "done"}
+
+
+_pt_msgs = run("read all three", _pt_chat, _pt_tools, system_prompt="t",
+               parallel_tools=True)
+_pt_results = [m["content"] for m in _pt_msgs if m.get("role") == "tool"]
+check("--parallel-tools executes every call", _pt_results == ["aaa", "bbb", "ccc"])
+
+# failed tool calls get one guided retry
+
+_rt_root = tempfile.mkdtemp()
+open(os.path.join(_rt_root, "real.txt"), "w").write("real content")
+_rt_script = {"n": 0}
+
+
+def _rt_chat(messages, tools):
+    _rt_script["n"] += 1
+    if _rt_script["n"] == 1:
+        return {"role": "assistant", "tool_calls": [
+            tool_call("c1", "read_file", {"path": "missing.txt"})]}
+    if _rt_script["n"] == 2:
+        return {"role": "assistant", "tool_calls": [
+            tool_call("c2", "read_file", {"path": "real.txt"})]}
+    return {"role": "assistant", "content": "got it"}
+
+
+_rt_msgs = run("read the file", _rt_chat, ToolSet(_rt_root),
+               system_prompt="t")
+_rt_hint = [m for m in _rt_msgs
+            if m.get("role") == "user" and "fix the arguments" in m["content"]]
+check("failed tool call gets one guided retry", len(_rt_hint) == 1)
+check("retry carries the error text", "no such file" in _rt_hint[0]["content"])
+check("model recovered after the retry",
+      any(m.get("content") == "real content" for m in _rt_msgs
+          if m.get("role") == "tool"))
+
+# --stop sequences reach the request body
+
+from client import ChatClient as _StopClient
+
+_sc = _StopClient("http://x/v1", "k", "m")
+_sb = _sc._body([{"role": "user", "content": "hi"}], stop=["END", "STOP"])
+check("--stop lands in the request body", _sb.get("stop") == ["END", "STOP"])
+_sb2 = _sc._body([{"role": "user", "content": "hi"}])
+check("no stop key when unset", "stop" not in _sb2)
+
+# --schema validation
+
+from main import validate_schema, enforce_schema, reflect_answer
+
+check("validate_schema passes good json",
+      validate_schema('{"a": 1}', {"required": ["a"]}) is None)
+check("validate_schema rejects non-json",
+      validate_schema("nope", {"required": ["a"]}) == "the answer is not valid json")
+check("validate_schema rejects non-objects",
+      validate_schema("[1, 2]", {"required": ["a"]}) == "the answer must be a json object")
+check("validate_schema flags missing keys",
+      validate_schema('{"a": 1}', {"required": ["a", "b"]})
+      == "missing required keys: b")
+
+
+def _fix_chat(messages, tools):
+    return {"role": "assistant", "content": '{"a": 1, "b": 2}',
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+_schema_args = parse_args(["t", "--schema", "s.json"])
+_schema_msgs = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": '{"a": 1}'}]
+with open(os.path.join(tempfile.mkdtemp(), "s.json"), "w") as _sf:
+    json.dump({"required": ["a", "b"]}, _sf)
+    _schema_args.schema = _sf.name
+_fixed = enforce_schema(_schema_args, _fix_chat, _schema_msgs,
+                        lambda s, u: False, 3)
+check("--schema asks for one fix when invalid",
+      last_answer(_fixed) == '{"a": 1, "b": 2}')
+
+# --reflect critiques the final answer and improves it
+
+_reflect_script = {"n": 0}
+
+
+def _reflect_chat(messages, tools):
+    _reflect_script["n"] += 1
+    return {"role": "assistant",
+            "content": "critique: too terse. improved: the much better answer",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+_reflect_args = parse_args(["t", "--reflect"])
+_reflect_msgs = [{"role": "user", "content": "go"},
+                 {"role": "assistant", "content": "the first answer"}]
+_out = reflect_answer(_reflect_args, _reflect_chat, _reflect_msgs,
+                      lambda s, u: False, 3)
+check("--reflect makes one extra model call", _reflect_script["n"] == 1)
+check("--reflect keeps the improved answer",
+      "the much better answer" in last_answer(_out))
+
+# --fallback-model switches models after a failure
+
+_fallback_calls = {"n": 0}
+
+
+class _FlakyClient:
+    def __init__(self):
+        self.model = "primary"
+
+    def chat(self, messages, tools, stop=None):
+        _fallback_calls["n"] += 1
+        if _fallback_calls["n"] == 1:
+            raise RuntimeError("api error 500 after 1 attempt(s): boom")
+        return {"role": "assistant", "content": "recovered"}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+from main import make_chat_fn
+
+_fb_args = parse_args(["t", "--no-stream", "--fallback-model", "backup"])
+_fb_client = _FlakyClient()
+_fb_fn = make_chat_fn(_fb_args, _fb_client)
+_fb_reply = _fb_fn([{"role": "user", "content": "hi"}], [])
+check("--fallback-model retries on the backup model",
+      _fb_reply["content"] == "recovered"
+      and _fallback_calls["n"] == 2)
+check("--fallback-model updates the model box",
+      _fb_fn.model_box["model"] == "backup"
+      and _fb_fn.model_box["fell_back"] is True)
+
+
+def _always_fail(messages, tools, **kw):
+    raise RuntimeError("down")
+
+
+_fb_args2 = parse_args(["t", "--no-stream", "--fallback-model", "backup"])
+_fb_client2 = _FlakyClient()
+_fb_client2.chat = _always_fail
+_fb_client2.chat_stream = _always_fail
+_fb_fn2 = make_chat_fn(_fb_args2, _fb_client2)
+try:
+    _fb_fn2([{"role": "user", "content": "hi"}], [])
+    _fb_raised = False
+except RuntimeError:
+    _fb_raised = True
+check("--fallback-model still raises when the backup fails", _fb_raised)
+
+# --fork branches a saved session
+
+_fork_home = os.environ.get("HOME")
+os.environ["HOME"] = tempfile.mkdtemp()
+from sessions import save_session
+save_session("base", [{"role": "user", "content": "original task"},
+                      {"role": "assistant", "content": "original answer"}])
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _FakePrintClient
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["new task", "--fork", "base", "--api-key", "x",
+                          "--root", tempfile.mkdtemp(), "--print"])
+_main_mod.ChatClient = _real_client
+check("--fork exits 0", _rc == 0)
+check("--fork says what it branched from",
+      "forked from session: base" in _buf.getvalue()
+      or _buf.getvalue() == "the answer\n")
+check("--fork parses", parse_args(["t", "--fork", "base"]).fork == "base")
+if _fork_home is None:
+    os.environ.pop("HOME", None)
+else:
+    os.environ["HOME"] = _fork_home
+
+# new flags parse
+
+check("--reflect parses", parse_args(["t", "--reflect"]).reflect is True)
+check("--fallback-model parses",
+      parse_args(["t", "--fallback-model", "x"]).fallback_model == "x")
+check("--stop parses", parse_args(["t", "--stop", "a,b"]).stop == "a,b")
+check("--max-tools parses", parse_args(["t", "--max-tools", "5"]).max_tools == 5)
+check("--time-limit parses",
+      parse_args(["t", "--time-limit", "30"]).time_limit == 30)
+check("--parallel-tools parses",
+      parse_args(["t", "--parallel-tools"]).parallel_tools is True)
+check("--verbose parses", parse_args(["t", "--verbose"]).verbose is True)
+
+# --- batch B: more agent tools ---
+
+_grep_root = tempfile.mkdtemp()
+open(os.path.join(_grep_root, "a.py"), "w").write("import os\nprint('hello')\n")
+open(os.path.join(_grep_root, "b.txt"), "w").write("hello world\nbye\n")
+_grep_tools = ToolSet(_grep_root)
+check("grep finds matches as file:line",
+      _grep_tools.call("grep", {"pattern": "hello"})
+      == "a.py:2: print('hello')\nb.txt:1: hello world")
+check("grep honors the glob filter",
+      _grep_tools.call("grep", {"pattern": "hello", "glob": "*.txt"})
+      == "b.txt:1: hello world")
+check("grep reports no matches",
+      _grep_tools.call("grep", {"pattern": "zzz"}) == "no matches for 'zzz'")
+check("grep rejects bad regex",
+      _grep_tools.call("grep", {"pattern": "["}).startswith("error: bad pattern"))
+check("grep is registered", "grep" in _grep_tools.schemas()[0] or
+      any(s["function"]["name"] == "grep" for s in _grep_tools.schemas()))
+
+_find_root = tempfile.mkdtemp()
+os.makedirs(os.path.join(_find_root, "sub"))
+open(os.path.join(_find_root, "a.py"), "w").write("x")
+open(os.path.join(_find_root, "sub", "b.py"), "w").write("x")
+open(os.path.join(_find_root, "sub", "c.txt"), "w").write("x")
+_find_tools = ToolSet(_find_root)
+check("find locates files recursively",
+      _find_tools.call("find", {"pattern": "*.py"}) == "a.py\nsub/b.py")
+check("find reports no matches",
+      _find_tools.call("find", {"pattern": "*.go"})
+      == "no files matching '*.go'")
+
+_tree_tools = ToolSet(_find_root)
+_tree_out = _tree_tools.call("tree", {"path": "."})
+_tree_base = os.path.basename(_find_root)
+check("tree shows the root", _tree_out.split("\n")[0] == _tree_base)
+check("tree marks dirs with a slash",
+      "sub/" in _tree_out and "a.py" in _tree_out)
+os.makedirs(os.path.join(_find_root, "sub", "deep"))
+open(os.path.join(_find_root, "sub", "deep", "x.txt"), "w").write("x")
+check("tree depth 1 hides nested content",
+      "deep/" not in _tree_tools.call("tree", {"path": ".", "depth": "1"})
+      and "deep/" in _tree_tools.call("tree", {"path": ".", "depth": "3"}))
+
+_rm_root = tempfile.mkdtemp()
+open(os.path.join(_rm_root, "one.txt"), "w").write("first")
+open(os.path.join(_rm_root, "two.txt"), "w").write("second")
+_rm_tools = ToolSet(_rm_root)
+_rm_out = _rm_tools.call("read_many", {"paths": '["one.txt", "two.txt"]'})
+check("read_many reads every file",
+      "=== one.txt ===\nfirst" in _rm_out
+      and "=== two.txt ===\nsecond" in _rm_out)
+check("read_many flags missing files",
+      "error: no such file" in _rm_tools.call(
+          "read_many", {"paths": '["nope.txt"]'}))
+check("read_many rejects bad json",
+      _rm_tools.call("read_many", {"paths": "nope"}).startswith("error:"))
+
+_ap_root = tempfile.mkdtemp()
+open(os.path.join(_ap_root, "a.txt"), "w").write("foo one\n")
+open(os.path.join(_ap_root, "b.txt"), "w").write("bar two\n")
+_ap_tools = ToolSet(_ap_root)
+_ap_edits = json.dumps([{"path": "a.txt", "old": "foo", "new": "FOO"},
+                        {"path": "b.txt", "old": "bar", "new": "BAR"}])
+check("apply_patch applies every edit",
+      _ap_tools.call("apply_patch", {"edits": _ap_edits})
+      == "applied 2 edits"
+      and open(os.path.join(_ap_root, "a.txt")).read() == "FOO one\n"
+      and open(os.path.join(_ap_root, "b.txt")).read() == "BAR two\n")
+_bad_edits = json.dumps([{"path": "a.txt", "old": "FOO", "new": "x"},
+                         {"path": "b.txt", "old": "missing", "new": "y"}])
+check("apply_patch is all or nothing",
+      _ap_tools.call("apply_patch", {"edits": _bad_edits})
+      .startswith("error:")
+      and open(os.path.join(_ap_root, "a.txt")).read() == "FOO one\n")
+check("apply_patch rejects bad json",
+      _ap_tools.call("apply_patch", {"edits": "nope"}).startswith("error:"))
+
+_fi_root = tempfile.mkdtemp()
+open(os.path.join(_fi_root, "f.txt"), "w").write("12345")
+_fi_tools = ToolSet(_fi_root)
+_fi_out = _fi_tools.call("file_info", {"path": "f.txt"})
+check("file_info reports type and size",
+      "type: file" in _fi_out and "size: 5 bytes" in _fi_out)
+check("file_info reports dirs",
+      "type: dir" in _fi_tools.call("file_info", {"path": "."}))
+check("file_info errors on missing paths",
+      _fi_tools.call("file_info", {"path": "nope"}).startswith("error:"))
+
+_git_root = tempfile.mkdtemp()
+subprocess.run(["git", "init", "-q"], cwd=_git_root)
+subprocess.run(["git", "config", "user.email", "t@t"], cwd=_git_root)
+subprocess.run(["git", "config", "user.name", "t"], cwd=_git_root)
+open(os.path.join(_git_root, "a.txt"), "w").write("v1\n")
+subprocess.run(["git", "add", "a.txt"], cwd=_git_root)
+subprocess.run(["git", "commit", "-qm", "first"], cwd=_git_root)
+open(os.path.join(_git_root, "a.txt"), "w").write("v2\n")
+_git_tools = ToolSet(_git_root)
+check("git_status shows the dirty file",
+      "a.txt" in _git_tools.call("git_status", {}))
+check("git_diff shows the change",
+      "v2" in _git_tools.call("git_diff", {})
+      and "-v1" in _git_tools.call("git_diff", {"path": "a.txt"}))
+check("git_log lists the commit",
+      "first" in _git_tools.call("git_log", {"count": "5"}))
+_nogit_tools = ToolSet(tempfile.mkdtemp())
+check("git_status errors outside a repo",
+      _nogit_tools.call("git_status", {}).startswith("error:"))
+check("git_log errors outside a repo",
+      _nogit_tools.call("git_log", {}).startswith("error:"))
+
+
+class _PostHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        resp = b'{"echo": ' + body + b'}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp)))
+        self.end_headers()
+        self.wfile.write(resp)
+
+    def log_message(self, *a):
+        pass
+
+
+_post_server = HTTPServer(("127.0.0.1", 0), _PostHandler)
+threading.Thread(target=_post_server.serve_forever, daemon=True).start()
+_post_url = "http://127.0.0.1:%d/hook" % _post_server.server_port
+
+_hp_tools = ToolSet(tempfile.mkdtemp())
+check("http_post is gated behind --ask mode",
+      _hp_tools.call("http_post", {"url": _post_url, "body": '{"a": 1}'})
+      == "error: http_post needs --ask mode, the user must confirm every "
+         "request")
+_hp_ask = ToolSet(tempfile.mkdtemp(), confirm=lambda p: True)
+_hp_out = _hp_ask.call("http_post", {"url": _post_url,
+                                     "body": '{"a": 1}'})
+check("http_post sends the json body",
+      "status 200" in _hp_out and '"a": 1' in _hp_out)
+_hp_no = ToolSet(tempfile.mkdtemp(), confirm=lambda p: False)
+check("http_post honors a declined confirmation",
+      _hp_no.call("http_post", {"url": _post_url, "body": "{}"})
+      .startswith("declined:"))
+check("http_post rejects non-http urls",
+      _hp_ask.call("http_post", {"url": "ftp://x", "body": "{}"})
+      .startswith("error: only http"))
+check("http_post rejects bad json bodies",
+      _hp_ask.call("http_post", {"url": _post_url, "body": "nope"})
+      .startswith("error: body must be a json"))
+_post_server.shutdown()
+
+_post_server.shutdown()
+
+# --- batch C: sessions and repl ---
+
+_sess_home = os.environ.get("HOME")
+os.environ["HOME"] = tempfile.mkdtemp()
+from sessions import (search_sessions, rename_session, delete_session,
+                      session_stats, list_sessions)
+
+save_session("alpha", [{"role": "user", "content": "fix the login bug"},
+                       {"role": "assistant", "content": "fixed it"}])
+save_session("beta", [{"role": "user", "content": "write docs"}])
+_hits = search_sessions("login")
+check("--search-sessions finds the right session",
+      len(_hits) == 1 and _hits[0][0] == "alpha"
+      and "login" in _hits[0][1])
+check("--search-sessions misses cleanly", search_sessions("zzz") == [])
+
+rename_session("beta", "gamma")
+check("mule sessions rename works",
+      "gamma" in list_sessions() and "beta" not in list_sessions())
+try:
+    rename_session("nope", "x")
+    _renamed_bad = False
+except ValueError:
+    _renamed_bad = True
+check("rename of a missing session errors", _renamed_bad)
+delete_session("gamma")
+check("mule sessions rm works", "gamma" not in list_sessions())
+_stats = session_stats()
+check("mule sessions stats counts messages",
+      any(s["name"] == "alpha" and s["messages"] == 2 for s in _stats))
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["sessions", "stats"])
+check("mule sessions stats exits 0", _rc == 0 and "alpha" in _buf.getvalue())
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["sessions", "list"])
+check("mule sessions list exits 0", _rc == 0 and "alpha" in _buf.getvalue())
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["sessions", "rename", "alpha", "alpha2"])
+check("mule sessions rename via cli",
+      _rc == 0 and "alpha2" in list_sessions())
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["sessions", "rm", "alpha2"])
+check("mule sessions rm via cli",
+      _rc == 0 and "alpha2" not in list_sessions())
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["sessions", "bogus"])
+check("mule sessions rejects bad actions", _rc == 2)
+check("--search-sessions parses",
+      parse_args(["--search-sessions", "q"]).search_sessions == "q")
+
+# auto-save: every one-shot run leaves a session behind
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _FakePrintClient
+_before = set(list_sessions())
+with contextlib.redirect_stdout(io.StringIO()):
+    _rc = _main_mod.main(["do it", "--api-key", "x",
+                          "--root", tempfile.mkdtemp(), "--print"])
+_main_mod.ChatClient = _real_client
+check("auto-save keeps the run",
+      _rc == 0 and len(set(list_sessions()) - _before) == 1)
+if _sess_home is None:
+    os.environ.pop("HOME", None)
+else:
+    os.environ["HOME"] = _sess_home
+
+# repl multiline input through ``` blocks
+
+_ml_lines = iter(["```", "line one", "line two", "```", "plain"])
+_ml_tasks = []
+_ml_slash = []
+
+
+def _ml_read(prompt):
+    try:
+        return next(_ml_lines)
+    except StopIteration:
+    # repl_loop breaks on EOFError
+        raise EOFError
+
+
+repl_loop(_ml_read, lambda s: None, _ml_tasks.append,
+          lambda l: _ml_slash.append(l))
+check("repl joins ``` blocks into one task",
+      _ml_tasks == ["```\nline one\nline two\n```", "plain"])
+
+# /model shows and switches
+
+_mctx = {"write": lambda s: None, "tools": ToolSet(tempfile.mkdtemp()),
+         "totals": {"in": 0, "out": 0}, "model": "gpt-4o-mini",
+         "save_fn": lambda n: n, "commands": {},
+         "set_model": lambda n: _mctx.update(model=n)}
+_mwritten = []
+_mctx["write"] = _mwritten.append
+handle_slash("/model", _mctx)
+check("/model shows the current model",
+      _mwritten[-1] == "model: gpt-4o-mini")
+handle_slash("/model gpt-4o", _mctx)
+check("/model switches the model",
+      _mctx["model"] == "gpt-4o" and _mwritten[-1] == "model: gpt-4o")
+
+# /tools off and on
+
+_tctx = {"write": lambda s: None, "tools": ToolSet(tempfile.mkdtemp()),
+         "totals": {"in": 0, "out": 0}, "model": "m",
+         "save_fn": lambda n: n, "commands": {}}
+_twritten = []
+_tctx["write"] = _twritten.append
+handle_slash("/tools off run_shell", _tctx)
+check("/tools off disables the tool",
+      "run_shell" in _tctx["tools"].disabled
+      and _twritten[-1] == "disabled: run_shell")
+check("disabled tools are blocked",
+      _tctx["tools"].call("run_shell", {"command": "echo hi"})
+      == "error: tool 'run_shell' is disabled")
+check("disabled tools leave the schema",
+      all(s["function"]["name"] != "run_shell"
+          for s in _tctx["tools"].schemas()))
+handle_slash("/tools on run_shell", _tctx)
+check("/tools on re-enables the tool",
+      "run_shell" not in _tctx["tools"].disabled)
+check("/tools off without a name shows usage",
+      handle_slash("/tools off", _tctx) is None
+      and _twritten[-1] == "usage: /tools [off NAME | on NAME]")
+
+# /retry reruns the last task
+
+_rctx = dict(_tctx)
+_rctx["last_task"] = "do the thing again"
+check("/retry reruns the last task",
+      handle_slash("/retry", _rctx) == ("run", "do the thing again"))
+_rctx["last_task"] = None
+_twritten.clear()
+check("/retry with no history says so",
+      handle_slash("/retry", _rctx) is None
+      and _twritten[-1] == "nothing to retry yet")
+
+# /compress collapses history through one model call
+
+check("/compress returns the compress action",
+      handle_slash("/compress", _rctx) == "compress")
+from repl import compress_history
+
+
+def _sum_chat(messages, tools):
+    return {"role": "assistant", "content": "we fixed the bug",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+_cmp = compress_history(_sum_chat,
+                        [{"role": "system", "content": "sys"},
+                         {"role": "user", "content": "fix it"},
+                         {"role": "assistant", "content": "done"}])
+check("compress_history keeps system plus a recap",
+      len(_cmp) == 2 and _cmp[0]["role"] == "system"
+      and "we fixed the bug" in _cmp[1]["content"])
+
+# --- batch D: config and cli ---
+
+from main import apply_tool_gates
+
+_gt_tools = ToolSet(tempfile.mkdtemp())
+_gt_args = parse_args(["t", "--deny-tools", "run_shell, write_file"])
+apply_tool_gates(_gt_args, _gt_tools)
+check("--deny-tools disables the named tools",
+      "run_shell" in _gt_tools.disabled
+      and "write_file" in _gt_tools.disabled
+      and "read_file" not in _gt_tools.disabled)
+
+_gt_tools2 = ToolSet(tempfile.mkdtemp())
+_gt_args2 = parse_args(["t", "--allow-tools", "read_file, list_dir"])
+apply_tool_gates(_gt_args2, _gt_tools2)
+check("--allow-tools disables everything else",
+      "read_file" not in _gt_tools2.disabled
+      and "list_dir" not in _gt_tools2.disabled
+      and "run_shell" in _gt_tools2.disabled)
+check("--allow-tools parses",
+      parse_args(["t", "--allow-tools", "a,b"]).allow_tools == "a,b")
+check("--deny-tools parses",
+      parse_args(["t", "--deny-tools", "a"]).deny_tools == "a")
+
+_ro_tools = ToolSet(tempfile.mkdtemp())
+apply_tool_gates(parse_args(["t", "--readonly"]), _ro_tools)
+check("--readonly disables writes and shell",
+      all(n in _ro_tools.disabled
+          for n in ("write_file", "edit_file", "apply_patch", "run_shell"))
+      and "read_file" not in _ro_tools.disabled
+      and "git_status" not in _ro_tools.disabled)
+check("--readonly parses", parse_args(["t", "--readonly"]).readonly is True)
+
+_nw_tools = ToolSet(tempfile.mkdtemp())
+apply_tool_gates(parse_args(["t", "--no-network"]), _nw_tools)
+check("--no-network disables the network tools",
+      all(n in _nw_tools.disabled
+          for n in ("fetch_url", "web_search", "http_post"))
+      and "read_file" not in _nw_tools.disabled)
+_nw_tools2 = ToolSet(tempfile.mkdtemp())
+_nw_args2 = parse_args(["t", "--no-network", "--allow-network"])
+apply_tool_gates(_nw_args2, _nw_tools2)
+check("--allow-network overrides --no-network",
+      not _nw_tools2.disabled)
+check("network flags parse",
+      parse_args(["t", "--no-network"]).no_network is True
+      and parse_args(["t"]).no_network is False
+      and parse_args(["t"]).allow_network is None)
+
+# flags can default from mule.json (the suite points config at
+# temp files, see the config tests above)
+_cfg_path = os.path.join(tempfile.mkdtemp(), "mule.json")
+with open(_cfg_path, "w") as _cf:
+    json.dump({"ask": True, "readonly": True, "max_tools": 7,
+               "allow_tools": "read_file"}, _cf)
+config.HOME_CONFIG = "/nonexistent/mule.json"
+config.LOCAL_CONFIG = _cfg_path
+_cfg_args = parse_args(["t"])
+check("config file sets flag defaults",
+      _cfg_args.ask is True and _cfg_args.readonly is True
+      and _cfg_args.max_tools == 7 and _cfg_args.allow_tools == "read_file")
+check("cli flags beat config defaults",
+      parse_args(["t", "--max-tools", "3"]).max_tools == 3)
+config.LOCAL_CONFIG = "/nonexistent/mule.json"
+
+# config schema validation
+
+_probs = validate_config({"model": "x", "max_steps": 5}, source="f")
+check("valid config has no problems", _probs == [])
+_probs = validate_config({"modle": "x"}, source="f")
+check("unknown keys are flagged with suggestions",
+      len(_probs) == 1 and "unknown key 'modle'" in _probs[0]
+      and "known keys" in _probs[0])
+_probs = validate_config({"max_steps": "many"}, source="f")
+check("wrong types are flagged",
+      len(_probs) == 1 and "max_steps" in _probs[0]
+      and "an integer" in _probs[0] and "str" in _probs[0])
+_probs = validate_config({"max_steps": True}, source="f")
+check("bools are not integers here", len(_probs) == 1)
+_probs = validate_config({"timeout": 1.5}, source="f")
+check("int-or-float fields accept both", _probs == [])
+
+_bad_path = os.path.join(tempfile.mkdtemp(), "mule.json")
+with open(_bad_path, "w") as _bf:
+    json.dump({"ask": "yes please", "bogus": 1}, _bf)
+config.HOME_CONFIG = "/nonexistent/mule.json"
+config.LOCAL_CONFIG = _bad_path
+_probs = config_problems()
+check("config_problems names the file",
+      len(_probs) == 2 and all(_bad_path in p for p in _probs))
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    parse_args(["t"])
+check("parse_args warns about bad config",
+      "config warning" in _err.getvalue()
+      and "should be true or false" in _err.getvalue())
+config.LOCAL_CONFIG = "/nonexistent/mule.json"
+
+# mule help and mule examples
+
+from main import cmd_help, cmd_examples
+
+for _topic in ("tools", "config", "sessions", "examples"):
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        _rc = _main_mod.main(["help", _topic])
+    check("mule help %s exits 0 with content" % _topic,
+          _rc == 0 and len(_buf.getvalue()) > 50)
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["help"])
+check("mule help without a topic shows usage", _rc == 2)
+_err = io.StringIO()
+with contextlib.redirect_stderr(_err):
+    _rc = _main_mod.main(["help", "bogus"])
+check("mule help rejects bad topics", _rc == 2)
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["examples"])
+check("mule examples prints examples",
+      _rc == 0 and "mule" in _buf.getvalue()
+      and "--interactive" in _buf.getvalue())
+_buf1, _buf2 = io.StringIO(), io.StringIO()
+with contextlib.redirect_stdout(_buf1):
+    _r1 = cmd_help(["examples"])
+with contextlib.redirect_stdout(_buf2):
+    _r2 = cmd_examples()
+check("mule help examples matches mule examples",
+      _r1 == _r2 == 0 and _buf1.getvalue() == _buf2.getvalue())
+
+# --template NAME with {{task}} substitution
+
+from main import load_template
+
+_tpl_root = tempfile.mkdtemp()
+_tpl_dir = os.path.join(_tpl_root, ".mule", "templates")
+os.makedirs(_tpl_dir)
+with open(os.path.join(_tpl_dir, "review.md"), "w") as _tf:
+    _tf.write("review this:\n\n{{task}}\n\nbe blunt.")
+check("load_template reads the file",
+      load_template(_tpl_root, "review") == "review this:\n\n{{task}}\n\nbe blunt.")
+check("load_template accepts the .md suffix",
+      load_template(_tpl_root, "review.md").startswith("review this:"))
+try:
+    load_template(_tpl_root, "nope")
+    _tpl_missing = False
+except ValueError as _e:
+    _tpl_missing = "no such template" in str(_e)
+check("load_template errors on missing names", _tpl_missing)
+check("{{task}} substitution works",
+      load_template(_tpl_root, "review").replace("{{task}}", "main.py")
+      == "review this:\n\nmain.py\n\nbe blunt.")
+check("--template parses",
+      parse_args(["t", "--template", "review"]).template == "review")
+
+# --template end to end: the model sees the wrapped task
+_seen_task = {}
+
+
+class _TplClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        _seen_task["task"] = messages[-1]["content"]
+        return {"role": "assistant", "content": "done",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _TplClient
+with contextlib.redirect_stdout(io.StringIO()):
+    _rc = _main_mod.main(["main.py", "--template", "review", "--api-key", "x",
+                          "--root", _tpl_root, "--print"])
+_main_mod.ChatClient = _real_client
+check("--template wraps the task end to end",
+      _rc == 0
+      and _seen_task["task"].startswith("review this:\n\nmain.py\n\nbe blunt."))
+
+# --import FILE: markdown and jsonl histories
+
+from sessions import import_history
+
+_imp_dir = tempfile.mkdtemp()
+_imp_jsonl = os.path.join(_imp_dir, "old.jsonl")
+with open(_imp_jsonl, "w") as _jf:
+    _jf.write('{"role": "user", "content": "hi"}\n')
+    _jf.write('{"role": "assistant", "content": "hello"}\n')
+_imp_md = os.path.join(_imp_dir, "old.md")
+with open(_imp_md, "w") as _mf:
+    _mf.write("# mule session\n\n## user\n\nfix the bug\n\n"
+              "## assistant\n\nfixed it\n\n```\nread_file {}\n```\n")
+_jl = import_history(_imp_jsonl)
+check("--import reads jsonl histories",
+      _jl == [{"role": "user", "content": "hi"},
+              {"role": "assistant", "content": "hello"}])
+_md = import_history(_imp_md)
+check("--import reads markdown transcripts",
+      _md == [{"role": "user", "content": "fix the bug"},
+              {"role": "assistant", "content": "fixed it"}])
+try:
+    import_history(os.path.join(_imp_dir, "old.txt"))
+    _imp_bad = False
+except ValueError as _e:
+    _imp_bad = "use a .md or .jsonl file" in str(_e)
+check("--import rejects other extensions", _imp_bad)
+check("--import parses", parse_args(["t", "--import", "x.md"]).import_ == "x.md")
+
+# --import end to end: the old messages lead the new run
+_seen_hist = {}
+
+
+class _ImpClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        _seen_hist["first"] = messages[0]
+        return {"role": "assistant", "content": "done",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _ImpClient
+with contextlib.redirect_stdout(io.StringIO()):
+    _rc = _main_mod.main(["next task", "--import", _imp_md, "--api-key", "x",
+                          "--root", tempfile.mkdtemp(), "--print"])
+_main_mod.ChatClient = _real_client
+check("--import seeds the run with old messages",
+      _rc == 0 and _seen_hist["first"] == {"role": "user",
+                                           "content": "fix the bug"})
+
+# distinct exit codes: 0 ok, 2 budget hit, 3 error, 130 cancelled
+
+
+class _BudgetClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        return {"role": "assistant", "content": "spending",
+                "usage": {"prompt_tokens": 1000000,
+                          "completion_tokens": 1000000}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+class _ErrorClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        raise RuntimeError("boom")
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+class _CancelClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        raise KeyboardInterrupt()
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+for _cls, _extra, _want, _label in (
+        (_BudgetClient, ["--max-cost", "0.000001"], EXIT_BUDGET,
+         "budget hit"),
+        (_ErrorClient, [], EXIT_ERROR, "api error"),
+        (_CancelClient, [], EXIT_CANCELLED, "ctrl-c")):
+    _main_mod.ChatClient = _cls
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        with contextlib.redirect_stderr(io.StringIO()):
+            _rc = _main_mod.main(["t", "--api-key", "x",
+                                  "--root", tempfile.mkdtemp(),
+                                  "--print"] + _extra)
+    _main_mod.ChatClient = _real_client
+    check("exit code for %s is %d" % (_label, _want), _rc == _want)
+check("successful run still exits 0",
+      _main_mod.main(["help", "tools"]) == EXIT_OK)
+
+# --trace: raw request/response pairs as jsonl
+
+
+class _TraceHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        body = json.dumps(
+            {"choices": [{"message": {"role": "assistant",
+                                      "content": "traced"}}],
+             "usage": {"prompt_tokens": 5,
+                       "completion_tokens": 5}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+_trace_file = os.path.join(tempfile.mkdtemp(), "trace.jsonl")
+_tserver = HTTPServer(("127.0.0.1", 0), _TraceHandler)
+threading.Thread(target=_tserver.serve_forever, daemon=True).start()
+_tclient = ChatClient("http://127.0.0.1:%d/v1" % _tserver.server_port,
+                      "secret-key-xyz", "m", trace_file=_trace_file)
+_reply = _tclient.chat([{"role": "user", "content": "hi"}])
+check("traced chat still works", _reply.get("content") == "traced")
+_tlines = open(_trace_file).read().strip().split("\n")
+check("--trace writes one jsonl record per call", len(_tlines) == 1)
+_trec = json.loads(_tlines[0])
+check("--trace record has request and response",
+      _trec["request"]["messages"][0]["content"] == "hi"
+      and _trec["response"]["choices"][0]["message"]["content"] == "traced")
+check("--trace never records the api key",
+      "secret-key-xyz" not in open(_trace_file).read())
+check("--trace parses", parse_args(["t", "--trace", "x"]).trace == "x")
+
+# --log-file: the whole run lands in the file too
+
+
+class _LogClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        return {"role": "assistant", "content": "logged answer",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_log_file = os.path.join(tempfile.mkdtemp(), "run.log")
+_main_mod.ChatClient = _LogClient
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["t", "--api-key", "x", "--root", tempfile.mkdtemp(),
+                          "--print", "--log-file", _log_file])
+_main_mod.ChatClient = _real_client
+check("--log-file mirrors stdout to the file",
+      _rc == 0 and "logged answer" in open(_log_file).read()
+      and "logged answer" in _buf.getvalue())
+check("--log-file parses",
+      parse_args(["t", "--log-file", "x"]).log_file == "x")
+
+# --tool-timeout: slow tools get cut off instead of hanging the run
+
+_slow_tools = ToolSet(tempfile.mkdtemp())
+
+
+def _slow():
+    _time.sleep(30)
+    return "too late"
+
+
+_slow_tools.tools["slow"] = {"name": "slow", "description": "hangs",
+                             "parameters": {}, "run": _slow}
+_slow_n = {"n": 0}
+
+
+def _slow_chat(messages, tools=None, stop=None):
+    _slow_n["n"] += 1
+    if _slow_n["n"] == 1:
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "1", "function": {"name": "slow",
+                                                       "arguments": "{}"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    return {"role": "assistant", "content": "done",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+
+import time as _time
+_t0 = _time.monotonic()
+_slow_msgs = run("t", _slow_chat, _slow_tools, tool_timeout=0.5,
+                 max_steps=5)
+_took = _time.monotonic() - _t0
+_tool_results = [m["content"] for m in _slow_msgs if m.get("role") == "tool"]
+check("--tool-timeout cuts off a stuck tool",
+      _took < 10 and len(_tool_results) == 1
+      and "timed out after 0.5s" in _tool_results[0])
+check("--tool-timeout parses",
+      parse_args(["t", "--tool-timeout", "5"]).tool_timeout == 5.0)
+
+# safety: dangerous denylist, critical commands, secrets warnings
+
+from tools import DANGEROUS, CRITICAL, _matches
+
+check("denylist catches disk writes",
+      _matches(DANGEROUS, "cat x > /dev/sda") == "writing to a raw disk")
+check("denylist catches chmod 777 /",
+      _matches(DANGEROUS, "chmod -R 777 / ") == "chmod 777 on /")
+check("denylist leaves normal commands alone",
+      _matches(DANGEROUS, "ls -la") is None)
+check("critical catches rm -rf /",
+      _matches(CRITICAL, "rm -rf /") == "rm -rf /")
+check("critical catches sudo rm -rf /*",
+      _matches(CRITICAL, "sudo rm -rf /*") == "rm -rf /")
+check("critical catches mkfs",
+      _matches(CRITICAL, "mkfs.ext4 /dev/sda1") == "mkfs")
+check("critical catches dd to a device",
+      _matches(CRITICAL, "dd if=/dev/zero of=/dev/sda bs=1M")
+      == "dd to a device")
+check("critical catches fork bombs",
+      _matches(CRITICAL, ":(){ :|:& };:") == "fork bomb")
+check("critical leaves rm of a file alone",
+      _matches(CRITICAL, "rm -rf ./build") is None)
+check("critical leaves dd to a file alone",
+      _matches(CRITICAL, "dd if=/dev/zero of=swap bs=1M count=1") is None)
+
+_st = ToolSet(tempfile.mkdtemp())
+check("run_shell refuses dangerous commands outright",
+      _st.run_shell("echo hi > /dev/sda").startswith("refused:"))
+check("run_shell refuses critical commands without a human",
+      _st.run_shell("rm -rf /").startswith("refused:"))
+check("run_shell still runs normal commands",
+      _st.run_shell("echo hi").startswith("exit 0"))
+
+_seen_critical = []
+_st2 = ToolSet(tempfile.mkdtemp(),
+               confirm_critical=lambda c: _seen_critical.append(c)
+               or False)
+check("critical command declined without the magic word",
+      _st2.run_shell("mkfs.ext4 /dev/sda1").startswith("refused:")
+      and _seen_critical == ["mkfs.ext4 /dev/sda1"])
+_st3 = ToolSet(tempfile.mkdtemp(), confirm_critical=lambda c: True)
+check("critical command runs after a typed yes",
+      _st3.run_shell("echo mkfs ").startswith("exit 0"))
+
+from unittest.mock import patch
+from main import ask_critical
+with patch("builtins.input", return_value="yes"):
+    check("ask_critical accepts the literal word yes",
+          ask_critical("rm -rf /") is True)
+with patch("builtins.input", return_value="y"):
+    check("ask_critical rejects a plain y",
+          ask_critical("rm -rf /") is False)
+with patch("builtins.input", return_value="YES"):
+    check("ask_critical is case sensitive",
+          ask_critical("rm -rf /") is False)
+
+_warns = []
+_st4 = ToolSet(tempfile.mkdtemp(), warn=_warns.append)
+with open(os.path.join(_st4.root, ".env"), "w") as _ef:
+    _ef.write("AWS_KEY=AKIAIOSFODNN7EXAMPLE\n")
+with open(os.path.join(_st4.root, "clean.txt"), "w") as _cf:
+    _cf.write("hello world\n")
+_st4.read_file(".env")
+check("secrets warning fires on credential files",
+      len(_warns) == 1 and "aws access key" in _warns[0]
+      and ".env" in _warns[0])
+_st4.read_file("clean.txt")
+check("no warning for clean files", len(_warns) == 1)
+_st4.grep("AWS", ".")
+check("grep warns when results contain secrets", len(_warns) == 2)
+
+# --version, /bug, mule demo
+
+from main import __version__
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    try:
+        _main_mod.main(["--version"])
+        _ver_exit = None
+    except SystemExit as _e:
+        _ver_exit = _e.code
+check("--version prints the version",
+      _ver_exit == 0 and _buf.getvalue().strip() == "mule " + __version__)
+
+from repl import handle_slash
+
+_bug_out = []
+handle_slash("/bug it crashed on startup",
+             {"write": _bug_out.append, "version": "0.9.0"})
+check("/bug prints a prefilled issue url",
+      len(_bug_out) == 1
+      and _bug_out[0].startswith(
+          "file it here:\nhttps://github.com/9osiris/mule/issues/new?")
+      and "title=it%20crashed%20on%20startup" in _bug_out[0]
+      and "mule%20version%3A%200.9.0" in _bug_out[0])
+_bug_out2 = []
+handle_slash("/bug", {"write": _bug_out2.append, "version": "0.9.0"})
+check("/bug defaults the title", "title=bug%20report" in _bug_out2[0])
+
+# branding: banner, panels, footer, spinner
+
+import ui as ui_mod
+from ui import banner_text, tool_panel, status_footer, Spinner, brand, \
+    SPINNER_FRAMES
+
+check("banner carries the mule head",
+      "\\__/" in banner_text("0.9.0", "m")
+      and "mule 0.9.0 - model m" in banner_text("0.9.0", "m"))
+check("spinner frames are four distinct custom frames",
+      len(SPINNER_FRAMES) == 4 and len(set(SPINNER_FRAMES)) == 4)
+
+_old_no_color = os.environ.pop("NO_COLOR", None)
+ui_mod.init_color(True)
+check("brand is plain with --no-color", brand("x") == "x")
+check("panels are plain with --no-color",
+      tool_panel("n", "s") == "┌─ n\n│ s\n└─")
+check("footer is plain with --no-color",
+      status_footer("0.9.0", "m", 1234, 567, "$0.01")
+      == "─" * 40 + "\nmule 0.9.0 | model m | 1,234 in / 567 out | $0.01")
+ui_mod.init_color(False)
+_on_wrapped = brand("x") != "x" and "1;33" in brand("x")
+if _old_no_color is not None:
+    os.environ["NO_COLOR"] = _old_no_color
+ui_mod.init_color(bool(_old_no_color))
+check("brand wraps in amber with color on", _on_wrapped)
+
+_spin = Spinner("thinking")
+_spin.tick()
+_spin.done()
+check("spinner is safe off-terminal", True)
+
+from main import make_show
+
+_show = make_show(parse_args(["t"]))
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _show(1, [{"id": "1",
+               "function": {"name": "run_shell",
+                            "arguments": '{"command": "echo hi"}'}}])
+check("tool calls render as panels",
+      "run_shell" in _buf.getvalue()
+      and "command=echo hi" in _buf.getvalue()
+      and "┌─" in _buf.getvalue())
+
+_main_mod.ChatClient = _LogClient
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _main_mod.main(["t", "--api-key", "x", "--root", tempfile.mkdtemp(),
+                    "--print"])
+check("--print stays banner-free",
+      "mule 0.9.0 - model" not in _buf.getvalue())
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    with contextlib.redirect_stderr(io.StringIO()):
+        _rc = _main_mod.main(["t", "--api-key", "x",
+                              "--root", tempfile.mkdtemp()])
+_main_mod.ChatClient = _real_client
+check("normal runs show the banner",
+      _rc == 0 and "mule 0.9.0 - model" in _buf.getvalue())
+check("normal runs end with the status footer",
+      "| 1 in / 1 out |" in _buf.getvalue())
+
+_demo_msg = _main_mod._demo_message({"messages": []})
+check("demo model lists the dir first",
+      _demo_msg["tool_calls"][0]["function"]["name"] == "list_dir")
+_demo_msg2 = _main_mod._demo_message(
+    {"messages": [{"role": "tool", "content": "a\nb\nc"}]})
+check("demo model summarizes after the tool result",
+      _demo_msg2["content"].startswith("demo done")
+      and "3 entries" in _demo_msg2["content"])
+
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    with contextlib.redirect_stderr(io.StringIO()):
+        _rc = _main_mod.main(["demo"])
+check("mule demo runs the loop with no api key",
+      _rc == 0 and "demo done" in _buf.getvalue())
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
