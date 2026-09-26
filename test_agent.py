@@ -1614,6 +1614,30 @@ check("dry run result says it was not executed",
           for m in _dry_messages if m.get("role") == "tool"))
 check("--dry-run parses", parse_args(["t", "--dry-run"]).dry_run is True)
 
+# tasks from stdin
+
+from main import resolve_task
+
+
+class _Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class _Pipe(io.StringIO):
+    def isatty(self):
+        return False
+
+
+check("explicit arg wins over stdin",
+      resolve_task(parse_args(["do x"]), _Pipe("do y")) == "do x")
+check("dash reads the task from stdin",
+      resolve_task(parse_args(["-"]), _Pipe("fix the bug")) == "fix the bug")
+check("a pipe feeds the task when no arg is given",
+      resolve_task(parse_args([]), _Pipe("piped task")) == "piped task")
+check("a tty with no arg gives no task",
+      resolve_task(parse_args([]), _Tty()) is None)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

@@ -343,6 +343,16 @@ def run_interactive(args, tools, system, messages, task,
     return 0
 
 
+def resolve_task(args, stdin):
+    # the task comes from the arg, from "-" (explicit stdin), or from
+    # a pipe when stdin is not a tty
+    task = args.task
+    if task == "-" or (not task and not args.interactive
+                       and not stdin.isatty()):
+        task = stdin.read().strip()
+    return task
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in SUBCOMMANDS:
@@ -373,9 +383,7 @@ def main(argv=None):
         if not args.quiet:
             say(args, "checkpoint saved: %s" % path)
 
-    task = args.task
-    if not task and not args.interactive and not sys.stdin.isatty():
-        task = sys.stdin.read().strip()
+    task = resolve_task(args, sys.stdin)
     if not task and not args.resume and not args.interactive:
         print("give it a task, as an argument or on stdin", file=sys.stderr)
         return 2
