@@ -97,8 +97,10 @@ def compact_messages(messages, chat, keep_last=10):
 
 
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
-        messages=None, usage_cb=None, on_todos=None, context_budget=None):
-    """the loop. chat(messages) -> assistant message dict, tools is a ToolSet."""
+        messages=None, usage_cb=None, on_todos=None, context_budget=None,
+        dry_run=False):
+    """the loop. chat(messages) -> assistant message dict, tools is a ToolSet.
+    dry_run prints what would happen without executing any tool."""
     if messages is None:
         messages = [
             {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
@@ -140,9 +142,16 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
             name = call["function"]["name"]
             try:
                 args = json.loads(call["function"].get("arguments") or "{}")
+                bad_args = False
             except json.JSONDecodeError:
                 args = {}
+                bad_args = True
+            if bad_args:
                 result = "error: arguments were not valid json"
+            elif dry_run:
+                # show the plan, touch nothing
+                result = "dry run, not executed: %s(%s)" % (
+                    name, json.dumps(args, sort_keys=True))
             else:
                 result = tools.call(name, args)
 

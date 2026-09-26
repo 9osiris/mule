@@ -318,7 +318,8 @@ def run_interactive(args, tools, system, messages, task,
                                   messages=box["messages"],
                                   usage_cb=track,
                                   on_todos=todos,
-                                  context_budget=args.context_budget)
+                                  context_budget=args.context_budget,
+                                  dry_run=args.dry_run)
         except RuntimeError as e:
             print("error: %s" % e)
             return
@@ -416,6 +417,8 @@ def main(argv=None):
         run_task = None  # the task is already in the history
 
     try:
+        if args.dry_run and not args.quiet and not args.json:
+            print("dry run: tools will not be executed")
         messages = run(run_task, chat_fn, tools,
                        system_prompt=system,
                        max_steps=args.max_steps,
@@ -423,7 +426,8 @@ def main(argv=None):
                        messages=run_messages,
                        usage_cb=track,
                        on_todos=todos,
-                       context_budget=args.context_budget)
+                       context_budget=args.context_budget,
+                       dry_run=args.dry_run)
     except RuntimeError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1

@@ -1582,6 +1582,38 @@ check("--json output serializes cleanly",
       json.loads(json.dumps(_json_result))["answer"] == "all done")
 check("--json parses", parse_args(["t", "--json"]).json is True)
 
+# --dry-run mode
+
+_dry_root = tempfile.mkdtemp()
+_dry_script = [
+    {"role": "assistant", "tool_calls": [
+        tool_call("c1", "write_file",
+                  {"path": "nope.txt", "content": "should not exist"}),
+        tool_call("c2", "run_shell", {"command": "touch touched.txt"})]},
+    {"role": "assistant", "content": "would have done it"},
+]
+_dry_calls = {"n": 0}
+
+
+def _dry_chat(messages, tools):
+    reply = _dry_script[_dry_calls["n"]]
+    _dry_calls["n"] += 1
+    return reply
+
+
+_dry_tools = ToolSet(_dry_root)
+_dry_messages = run("make the files", _dry_chat, _dry_tools,
+                    system_prompt="test", max_steps=5, dry_run=True)
+check("dry run consults the model", _dry_calls["n"] == 2)
+check("dry run writes no files",
+      not os.path.exists(os.path.join(_dry_root, "nope.txt")))
+check("dry run runs no shell commands",
+      not os.path.exists(os.path.join(_dry_root, "touched.txt")))
+check("dry run result says it was not executed",
+      any("dry run, not executed" in m.get("content", "")
+          for m in _dry_messages if m.get("role") == "tool"))
+check("--dry-run parses", parse_args(["t", "--dry-run"]).dry_run is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
