@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 16)
+      and len(seen["bodies"][0]["tools"]) == 21)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -2318,6 +2318,75 @@ check("grep rejects bad regex",
       _grep_tools.call("grep", {"pattern": "["}).startswith("error: bad pattern"))
 check("grep is registered", "grep" in _grep_tools.schemas()[0] or
       any(s["function"]["name"] == "grep" for s in _grep_tools.schemas()))
+
+_find_root = tempfile.mkdtemp()
+os.makedirs(os.path.join(_find_root, "sub"))
+open(os.path.join(_find_root, "a.py"), "w").write("x")
+open(os.path.join(_find_root, "sub", "b.py"), "w").write("x")
+open(os.path.join(_find_root, "sub", "c.txt"), "w").write("x")
+_find_tools = ToolSet(_find_root)
+check("find locates files recursively",
+      _find_tools.call("find", {"pattern": "*.py"}) == "a.py\nsub/b.py")
+check("find reports no matches",
+      _find_tools.call("find", {"pattern": "*.go"})
+      == "no files matching '*.go'")
+
+_tree_tools = ToolSet(_find_root)
+_tree_out = _tree_tools.call("tree", {"path": "."})
+_tree_base = os.path.basename(_find_root)
+check("tree shows the root", _tree_out.split("\n")[0] == _tree_base)
+check("tree marks dirs with a slash",
+      "sub/" in _tree_out and "a.py" in _tree_out)
+os.makedirs(os.path.join(_find_root, "sub", "deep"))
+open(os.path.join(_find_root, "sub", "deep", "x.txt"), "w").write("x")
+check("tree depth 1 hides nested content",
+      "deep/" not in _tree_tools.call("tree", {"path": ".", "depth": "1"})
+      and "deep/" in _tree_tools.call("tree", {"path": ".", "depth": "3"}))
+
+_rm_root = tempfile.mkdtemp()
+open(os.path.join(_rm_root, "one.txt"), "w").write("first")
+open(os.path.join(_rm_root, "two.txt"), "w").write("second")
+_rm_tools = ToolSet(_rm_root)
+_rm_out = _rm_tools.call("read_many", {"paths": '["one.txt", "two.txt"]'})
+check("read_many reads every file",
+      "=== one.txt ===\nfirst" in _rm_out
+      and "=== two.txt ===\nsecond" in _rm_out)
+check("read_many flags missing files",
+      "error: no such file" in _rm_tools.call(
+          "read_many", {"paths": '["nope.txt"]'}))
+check("read_many rejects bad json",
+      _rm_tools.call("read_many", {"paths": "nope"}).startswith("error:"))
+
+_ap_root = tempfile.mkdtemp()
+open(os.path.join(_ap_root, "a.txt"), "w").write("foo one\n")
+open(os.path.join(_ap_root, "b.txt"), "w").write("bar two\n")
+_ap_tools = ToolSet(_ap_root)
+_ap_edits = json.dumps([{"path": "a.txt", "old": "foo", "new": "FOO"},
+                        {"path": "b.txt", "old": "bar", "new": "BAR"}])
+check("apply_patch applies every edit",
+      _ap_tools.call("apply_patch", {"edits": _ap_edits})
+      == "applied 2 edits"
+      and open(os.path.join(_ap_root, "a.txt")).read() == "FOO one\n"
+      and open(os.path.join(_ap_root, "b.txt")).read() == "BAR two\n")
+_bad_edits = json.dumps([{"path": "a.txt", "old": "FOO", "new": "x"},
+                         {"path": "b.txt", "old": "missing", "new": "y"}])
+check("apply_patch is all or nothing",
+      _ap_tools.call("apply_patch", {"edits": _bad_edits})
+      .startswith("error:")
+      and open(os.path.join(_ap_root, "a.txt")).read() == "FOO one\n")
+check("apply_patch rejects bad json",
+      _ap_tools.call("apply_patch", {"edits": "nope"}).startswith("error:"))
+
+_fi_root = tempfile.mkdtemp()
+open(os.path.join(_fi_root, "f.txt"), "w").write("12345")
+_fi_tools = ToolSet(_fi_root)
+_fi_out = _fi_tools.call("file_info", {"path": "f.txt"})
+check("file_info reports type and size",
+      "type: file" in _fi_out and "size: 5 bytes" in _fi_out)
+check("file_info reports dirs",
+      "type: dir" in _fi_tools.call("file_info", {"path": "."}))
+check("file_info errors on missing paths",
+      _fi_tools.call("file_info", {"path": "nope"}).startswith("error:"))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

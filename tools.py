@@ -261,6 +261,35 @@ class ToolSet:
                                "glob": "filename filter like '*.py', default '*'"},
                 "run": self.grep,
             },
+            "find": {
+                "description": "find files by name pattern, returns relative paths",
+                "parameters": {"pattern": "glob like '*.py' or 'test*'",
+                               "path": "where to search, default '.'"},
+                "run": self.find,
+            },
+            "tree": {
+                "description": "show the directory structure as a tree",
+                "parameters": {"path": "where to start, default '.'",
+                               "depth": "how deep to go, default 3"},
+                "run": self.tree,
+            },
+            "read_many": {
+                "description": "read several files at once, each headed "
+                               "by its path",
+                "parameters": {"paths": "json list of relative paths"},
+                "run": self.read_many,
+            },
+            "apply_patch": {
+                "description": "apply several edit_file-style patches in "
+                               "one call, all or nothing",
+                "parameters": {"edits": "json list of {path, old, new} objects"},
+                "run": self.apply_patch,
+            },
+            "file_info": {
+                "description": "size, type, and modified time for a path",
+                "parameters": {"path": "relative path"},
+                "run": self.file_info,
+            },
         }
 
     def schemas(self):
@@ -632,3 +661,120 @@ class ToolSet:
                 except OSError:
                     continue
         return "\n".join(hits) or "no matches for %r" % pattern
+
+    def find(self, pattern="*", path="."):
+        # find files by name, glob against the basename
+        base = self._resolve(path)
+        if not os.path.isdir(base):
+            return "error: not a directory: %s" % path
+        found = []
+        for dirpath, _, files in os.walk(base):
+            for name in sorted(files):
+                if fnmatch.fnmatch(name, pattern or "*"):
+                    found.append(os.path.relpath(
+                        os.path.join(dirpath, name), self.root))
+                if len(found) >= 100:
+                    return "\n".join(found) + "\n...[truncated]"
+        return "\n".join(found) or "no files matching %r" % pattern
+
+    def tree(self, path=".", depth="3"):
+        # classic tree view, dirs get a trailing slash
+        try:
+            max_depth = max(1, min(int(depth), 10))
+        except (TypeError, ValueError):
+            max_depth = 3
+        base = self._resolve(path)
+        if not os.path.isdir(base):
+            return "error: not a directory: %s" % path
+        lines = [os.path.basename(base) or base]
+
+        def walk(dirpath, prefix, level):
+            if level > max_depth:
+                return
+            try:
+                entries = sorted(os.listdir(dirpath))
+            except OSError:
+                return
+            # dirs first, like the real tree command
+            entries.sort(key=lambda e: not os.path.isdir(
+                os.path.join(dirpath, e)))
+            for i, name in enumerate(entries):
+                last = i == len(entries) - 1
+                branch = "└── " if last else "├── "
+                full = os.path.join(dirpath, name)
+                label = name + "/" if os.path.isdir(full) else name
+                lines.append(prefix + branch + label)
+                if os.path.isdir(full):
+                    walk(full, prefix + ("    " if last else "│   "),
+                         level + 1)
+
+        walk(base, "", 1)
+        return "\n".join(lines)
+
+    def read_many(self, paths="[]"):
+        # read a batch of files in one call, capped at 10
+        try:
+            wanted = json.loads(paths or "[]")
+        except ValueError:
+            return "error: paths must be a json list"
+        if not isinstance(wanted, list):
+            return "error: paths must be a json list"
+        parts = []
+        for p in wanted[:10]:
+            full = self._resolve(p)
+            if not os.path.isfile(full):
+                parts.append("=== %s ===\nerror: no such file" % p)
+                continue
+            with open(full, "r", errors="replace") as f:
+                data = f.read(MAX_READ + 1)
+            if len(data) > MAX_READ:
+                data = data[:MAX_READ] + "\n...[truncated]"
+            parts.append("=== %s ===\n%s" % (p, data))
+        return "\n\n".join(parts) or "(no files given)"
+
+    def apply_patch(self, edits="[]"):
+        # batch of {path, old, new} edits. every old string must
+        # match exactly once, otherwise nothing is written.
+        try:
+            wanted = json.loads(edits or "[]")
+        except ValueError:
+            return "error: edits must be a json list"
+        if not isinstance(wanted, list) or not wanted:
+            return "error: edits must be a non-empty json list"
+        staged = []
+        for e in wanted:
+            path = (e or {}).get("path", "")
+            old, new = (e or {}).get("old", ""), (e or {}).get("new", "")
+            full = self._resolve(path)
+            if not os.path.isfile(full):
+                return "error: no such file: %s (nothing applied)" % path
+            if not old:
+                return "error: empty old string for %s (nothing applied)" % path
+            with open(full, "r", errors="replace") as f:
+                data = f.read()
+            if data.count(old) != 1:
+                return ("error: old string matches %d times in %s, "
+                        "need exactly 1 (nothing applied)"
+                        % (data.count(old), path))
+            staged.append((path, full, data.replace(old, new, 1)))
+        if self.confirm and not self.confirm(
+                "apply_patch: %d edits across %d files"
+                % (len(staged), len({p for p, _, _ in staged}))):
+            return "declined: the patch was not applied"
+        for path, full, data in staged:
+            self.backups.stash(full)
+            with open(full, "w") as f:
+                f.write(data)
+        return "applied %d edits" % len(staged)
+
+    def file_info(self, path):
+        # quick stat block: type, size, modified time
+        full = self._resolve(path or ".")
+        if not os.path.exists(full):
+            return "error: no such file or directory: %s" % path
+        st = os.stat(full)
+        kind = "dir" if os.path.isdir(full) else "file"
+        when = datetime.datetime.fromtimestamp(
+            st.st_mtime).strftime("%Y-%m-%d %H:%M")
+        return "path: %s\ntype: %s\nsize: %d bytes\nmodified: %s" % (
+            path, kind, st.st_size, when)
