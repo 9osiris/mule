@@ -888,6 +888,89 @@ check("--max-cost parses",
 check("--max-cost defaults to none",
       parse_args(["t"]).max_cost is None)
 
+# interactive repl: slash commands and the prompt loop
+
+from repl import parse_slash, handle_slash, repl_loop, HELP_TEXT
+
+check("parse /save NAME",
+      parse_slash("/save foo") == ("save", "foo"))
+check("parse /quit", parse_slash("/quit") == ("quit", ""))
+check("parse is case-insensitive", parse_slash("/HELP") == ("help", ""))
+check("parse keeps multiword arg",
+      parse_slash("/save my session") == ("save", "my session"))
+check("parse bare slash", parse_slash("/") == ("", ""))
+
+rtools = ToolSet(tempfile.mkdtemp())
+rtools.backups = BackupStore(backup_dir=tempfile.mkdtemp())
+rtarget = os.path.join(rtools.root, "u.txt")
+open(rtarget, "w").write("before\n")
+rtools.call("write_file", {"path": "u.txt", "content": "after\n"})
+
+saved = {}
+written = []
+rctx = {
+    "write": written.append,
+    "tools": rtools,
+    "totals": {"in": 1000000, "out": 500000},
+    "model": "gpt-4o-mini",
+    "save_fn": lambda name: saved.setdefault("name", name) or "/s.jsonl",
+}
+
+check("/quit returns quit", handle_slash("/quit", rctx) == "quit")
+check("/clear returns clear", handle_slash("/clear", rctx) == "clear")
+check("/help prints help",
+      handle_slash("/help", rctx) is None and written[-1] == HELP_TEXT)
+check("/cost shows spend",
+      handle_slash("/cost", rctx) is None
+      and "1,000,000 in / 500,000 out" in written[-1]
+      and "$0.45" in written[-1])
+check("/save calls save_fn",
+      handle_slash("/save work", rctx) is None
+      and saved["name"] == "work"
+      and written[-1].startswith("saved session: "))
+check("/save without name nudges",
+      handle_slash("/save", rctx) is None
+      and written[-1] == "usage: /save NAME")
+check("/undo restores through the repl",
+      handle_slash("/undo", rctx) is None
+      and written[-1] == "restored u.txt"
+      and open(rtarget).read() == "before\n")
+check("/undo with empty stack",
+      handle_slash("/undo", rctx) is None
+      and written[-1] == "nothing to undo")
+check("unknown slash is reported",
+      handle_slash("/nope", rctx) is None
+      and "unknown command" in written[-1])
+
+# the loop: tasks dispatch, slashes handled, history shared
+
+loop_lines = iter(["first task", "", "  ", "/cost", "second", "/quit"])
+loop_tasks = []
+loop_out = []
+loop_ctx = dict(rctx)
+loop_ctx["write"] = loop_out.append
+repl_loop(lambda p: next(loop_lines), loop_out.append,
+          loop_tasks.append, lambda line: handle_slash(line, loop_ctx))
+check("loop dispatches both tasks",
+      loop_tasks == ["first task", "second"])
+check("loop skips blanks", len(loop_tasks) == 2)
+check("loop ran the slash",
+      any("1,000,000 in" in w for w in loop_out))
+check("loop greets first", loop_out[0].startswith("interactive mode"))
+
+
+def eof_read(prompt):
+    raise EOFError()
+
+
+eof_out = []
+repl_loop(eof_read, eof_out.append, lambda l: None, lambda l: None)
+check("eof leaves the loop", True)
+
+check("--interactive parses",
+      parse_args(["--interactive"]).interactive is True)
+check("--undo parses", parse_args(["--undo"]).undo is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

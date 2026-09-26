@@ -7,6 +7,7 @@ from agent import run, last_answer, load_system_prompt
 from client import ChatClient
 from config import load_config
 from cost import cost_for, fmt_cost
+from repl import repl_loop, handle_slash
 from sessions import save_session, load_session, list_sessions, auto_name
 from tools import ToolSet
 
@@ -66,6 +67,10 @@ def parse_args(argv=None):
                    help="list saved sessions and exit")
     p.add_argument("--ask", action="store_true",
                    help="ask for confirmation before each shell command")
+    p.add_argument("--undo", action="store_true",
+                   help="restore the most recently changed file and exit")
+    p.add_argument("--interactive", action="store_true",
+                   help="prompt loop for follow-up tasks")
     return p.parse_args(argv)
 
 
@@ -76,37 +81,7 @@ def ask_cmd(command):
     return ans in ("y", "yes")
 
 
-def main(argv=None):
-    args = parse_args(argv)
-
-    if args.list_sessions:
-        for name in list_sessions():
-            print(name)
-        return 0
-
-    task = args.task
-    if not task and not sys.stdin.isatty():
-        task = sys.stdin.read().strip()
-    if not task and not args.resume:
-        print("give it a task, as an argument or on stdin", file=sys.stderr)
-        return 2
-    if not args.api_key:
-        print("set OPENAI_API_KEY or pass --api-key", file=sys.stderr)
-        return 2
-
-    tools = ToolSet(args.root, confirm=ask_cmd if args.ask else None)
-    client = ChatClient(args.base_url, args.api_key, args.model,
-                        timeout=args.timeout, retries=args.retries)
-    system = load_system_prompt(args.system_prompt)
-
-    messages = None
-    if args.resume:
-        try:
-            messages = load_session(args.resume)
-        except ValueError as e:
-            print("error: %s" % e, file=sys.stderr)
-            return 1
-
+def make_chat_fn(args, client):
     def chat_fn(messages, tools):
         # stream tokens live unless --no-stream was passed
         if args.no_stream:
@@ -123,7 +98,10 @@ def main(argv=None):
         if printed and not args.quiet:
             print()
         return reply
+    return chat_fn
 
+
+def make_show(args):
     def show(step, calls):
         if args.quiet:
             return
@@ -131,9 +109,10 @@ def main(argv=None):
             a = json.loads(c["function"].get("arguments") or "{}")
             summary = " ".join("%s=%s" % (k, str(v)[:60]) for k, v in a.items())
             print("$ %s %s" % (c["function"]["name"], summary))
+    return show
 
-    totals = {"in": 0, "out": 0}
 
+def make_track(args, totals):
     def track(step, usage):
         # returns True when the cost budget is blown, stopping the loop
         if usage:
@@ -150,6 +129,94 @@ def main(argv=None):
             if spent is not None and spent > args.max_cost:
                 return True
         return False
+    return track
+
+
+def run_interactive(args, tools, system, messages, task,
+                    chat_fn, show, track, totals):
+    # prompt loop: each line is a task, history carries over
+    box = {"messages": messages}
+
+    def save_fn(name):
+        return save_session(name, box["messages"])
+
+    ctx = {"write": print, "tools": tools, "totals": totals,
+           "model": args.model, "save_fn": save_fn}
+
+    def on_slash(line):
+        action = handle_slash(line, ctx)
+        if action == "clear":
+            box["messages"] = [{"role": "system", "content": system}]
+            print("history cleared")
+        return action
+
+    def on_task(line):
+        try:
+            box["messages"] = run(line, chat_fn, tools,
+                                  system_prompt=system,
+                                  max_steps=args.max_steps,
+                                  on_step=show,
+                                  messages=box["messages"],
+                                  usage_cb=track)
+        except RuntimeError as e:
+            print("error: %s" % e)
+            return
+        if not args.quiet:
+            print("---")
+        print(last_answer(box["messages"]))
+
+    if task:
+        # a task on the command line runs first, then the loop takes over
+        on_task(task)
+    repl_loop(input, print, on_task, on_slash)
+    return 0
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    if args.list_sessions:
+        for name in list_sessions():
+            print(name)
+        return 0
+
+    tools = ToolSet(args.root, confirm=ask_cmd if args.ask else None)
+    if args.undo:
+        print(tools.undo_last())
+        return 0
+
+    task = args.task
+    if not task and not args.interactive and not sys.stdin.isatty():
+        task = sys.stdin.read().strip()
+    if not task and not args.resume and not args.interactive:
+        print("give it a task, as an argument or on stdin", file=sys.stderr)
+        return 2
+    if not args.api_key:
+        print("set OPENAI_API_KEY or pass --api-key", file=sys.stderr)
+        return 2
+
+    client = ChatClient(args.base_url, args.api_key, args.model,
+                        timeout=args.timeout, retries=args.retries)
+    system = load_system_prompt(args.system_prompt)
+
+    messages = None
+    if args.resume:
+        try:
+            messages = load_session(args.resume)
+        except ValueError as e:
+            print("error: %s" % e, file=sys.stderr)
+            return 1
+    if args.interactive and messages is None:
+        messages = [{"role": "system", "content": system}]
+
+    chat_fn = make_chat_fn(args, client)
+    show = make_show(args)
+    totals = {"in": 0, "out": 0}
+    track = make_track(args, totals)
+
+    if args.interactive:
+        return run_interactive(args, tools, system, messages, task,
+                               chat_fn, show, track, totals)
 
     try:
         messages = run(task, chat_fn, tools,

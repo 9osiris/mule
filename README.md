@@ -39,6 +39,8 @@ python main.py "summarize the repo layout" \
 - `--resume NAME` - resume a saved session, then continue with the task
 - `--list-sessions` - list saved sessions and exit
 - `--ask` - ask for confirmation before each shell command
+- `--undo` - restore the most recently changed file and exit
+- `--interactive` - prompt loop for follow-up tasks
 - `--timeout SEC` - api request timeout (default: 120)
 - `--retries N` - retries on 429/5xx with exponential backoff (default: 3)
 - `--max-cost DOLLARS` - stop the agent when session cost exceeds this
@@ -75,6 +77,30 @@ python main.py "add tests for the parser" --save parser-work
 # later
 python main.py --resume parser-work "now fix the failing test"
 ```
+
+## interactive mode
+
+`--interactive` starts a prompt loop. type a task, get an answer,
+type a follow-up; the conversation history carries over between
+turns. slash commands:
+
+- `/help` - show the commands
+- `/quit` - leave the loop
+- `/clear` - reset the conversation history
+- `/save NAME` - save the session to `~/.mule/sessions/`
+- `/cost` - show tokens and spend so far
+- `/undo` - restore the most recently changed file
+
+a task on the command line runs first, then the loop takes over:
+
+```bash
+python main.py --interactive "refactor the parser"
+```
+
+file changes are backed up before every write or edit, so `/undo`
+(or `--undo` for one-shot runs) restores the most recent one. in
+`--ask` mode, file writes show a unified diff in the confirmation
+prompt before anything is applied.
 
 ## cost tracking
 
