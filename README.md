@@ -25,20 +25,20 @@ python main.py "summarize the repo layout" \
 
 ## flags
 
-- `task` — what to do (or pipe it on stdin)
-- `--model` — model name (default: gpt-4o-mini, or MULE_MODEL)
-- `--base-url` — api base (default: https://api.openai.com/v1, or MULE_BASE_URL)
-- `--api-key` — defaults to OPENAI_API_KEY
-- `--root` — project dir the agent is sandboxed to (default: .)
-- `--max-steps` — tool rounds before it gives up (default: 25)
-- `--system-prompt` — path to a custom prompt file (default: prompt.md)
-- `--quiet` — only print the final answer
+- `task` - what to do (or pipe it on stdin)
+- `--model` - model name (default: gpt-4o-mini, or MULE_MODEL)
+- `--base-url` - api base (default: https://api.openai.com/v1, or MULE_BASE_URL)
+- `--api-key` - defaults to OPENAI_API_KEY
+- `--root` - project dir the agent is sandboxed to (default: .)
+- `--max-steps` - tool rounds before it gives up (default: 25)
+- `--system-prompt` - path to a custom prompt file (default: prompt.md)
+- `--quiet` - only print the final answer
 
 ## how it works
 
 `agent.py` runs the loop: send messages, take the model's tool calls,
-run them, feed results back, repeat. `tools.py` has four tools —
-read_file, write_file, list_dir, run_shell — all sandboxed to `--root`
+run them, feed results back, repeat. `tools.py` has four tools -
+read_file, write_file, list_dir, run_shell - all sandboxed to `--root`
 so the agent can't wander out of the project dir. `client.py` is the
 http client for /v1/chat/completions. `prompt.md` is the system prompt.
 

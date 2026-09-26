@@ -28,7 +28,7 @@ def tool_call(cid, name, args):
     }
 
 
-# --- 1. the loop, driven by a scripted fake model ---
+# loop test with a scripted fake model
 
 root = tempfile.mkdtemp()
 script = [
@@ -67,7 +67,7 @@ check("shell result has the content",
 check("loop stopped on final answer",
       last_answer(messages) == "done, the file says hello from agent")
 
-# --- 2. sandbox: paths can't escape root ---
+# sandbox: paths cant escape root
 
 check("write outside root rejected",
       "escapes project root" in tools.call("write_file",
@@ -77,12 +77,12 @@ check("read outside root rejected",
 check("unknown tool is an error, not a crash",
       tools.call("nope", {}).startswith("error:"))
 
-# --- 3. shell timeout ---
+# shell timeout
 
 out = tools.call("run_shell", {"command": "sleep 5", "timeout": "1"})
 check("slow command times out", "timed out" in out)
 
-# --- 4. max steps stops a stubborn model ---
+# max steps stops a stubborn model
 
 def stubborn(messages, tools):
     return {"role": "assistant",
@@ -92,7 +92,7 @@ msgs = run("x", stubborn, tools, system_prompt="t", max_steps=3)
 check("max steps stops the loop",
       any("max steps" in (m.get("content") or "") for m in msgs))
 
-# --- 5. full loop through a fake openai-compatible server ---
+# full loop through a fake openai-compatible server
 
 RESPONSES = [
     {"choices": [{"message": {
