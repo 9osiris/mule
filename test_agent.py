@@ -254,6 +254,7 @@ check("tool result fed back after streamed call",
 # --no-stream flag parsing
 
 from main import parse_args, ask_cmd, build_parser, run_subcommand
+from main import EXIT_OK, EXIT_BUDGET, EXIT_ERROR, EXIT_CANCELLED
 from config import validate_config, config_problems
 check("--no-stream defaults off",
       parse_args(["do things"]).no_stream is False)
@@ -1447,7 +1448,7 @@ check("cli config --global get works",
 check("cli config bad action errors",
       cmd_config(["frobnicate"]) == 2)
 check("cli config unknown key errors",
-      cmd_config(["set", "nope", "x"]) == 1)
+      cmd_config(["set", "nope", "x"]) == EXIT_ERROR)
 
 config_mod.HOME_CONFIG = _orig_home
 config_mod.LOCAL_CONFIG = _orig_local
@@ -2864,6 +2865,61 @@ _main_mod.ChatClient = _real_client
 check("--import seeds the run with old messages",
       _rc == 0 and _seen_hist["first"] == {"role": "user",
                                            "content": "fix the bug"})
+
+# distinct exit codes: 0 ok, 2 budget hit, 3 error, 130 cancelled
+
+
+class _BudgetClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        return {"role": "assistant", "content": "spending",
+                "usage": {"prompt_tokens": 1000000,
+                          "completion_tokens": 1000000}}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+class _ErrorClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        raise RuntimeError("boom")
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+class _CancelClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def chat(self, messages, tools, stop=None):
+        raise KeyboardInterrupt()
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+for _cls, _extra, _want, _label in (
+        (_BudgetClient, ["--max-cost", "0.000001"], EXIT_BUDGET,
+         "budget hit"),
+        (_ErrorClient, [], EXIT_ERROR, "api error"),
+        (_CancelClient, [], EXIT_CANCELLED, "ctrl-c")):
+    _main_mod.ChatClient = _cls
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        with contextlib.redirect_stderr(io.StringIO()):
+            _rc = _main_mod.main(["t", "--api-key", "x",
+                                  "--root", tempfile.mkdtemp(),
+                                  "--print"] + _extra)
+    _main_mod.ChatClient = _real_client
+    check("exit code for %s is %d" % (_label, _want), _rc == _want)
+check("successful run still exits 0",
+      _main_mod.main(["help", "tools"]) == EXIT_OK)
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

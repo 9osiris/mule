@@ -7,6 +7,10 @@ from agent import run, last_answer, load_system_prompt, plan_and_approve, \
     _clean_reply
 from client import ChatClient
 from config import load_config, load_profile, config_problems
+
+# exit codes: 0 ok, 2 budget hit (or usage error), 3 runtime error,
+# 130 user pressed ctrl-c
+EXIT_OK, EXIT_BUDGET, EXIT_ERROR, EXIT_CANCELLED = 0, 2, 3, 130
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name, \
@@ -199,7 +203,7 @@ def run_subcommand(name, rest):
             created = init_project(target, force=force)
         except FileExistsError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         for path in created:
             print("created %s" % path)
         return 0
@@ -337,7 +341,7 @@ def cmd_sessions(rest):
                       % (r["name"], r["messages"], r["bytes"]))
     except ValueError as e:
         print(red("error: %s" % e), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     return 0
 
 
@@ -375,7 +379,7 @@ def cmd_config(rest):
             print("unset %s" % args[1])
     except KeyError as e:
         print(red("error: %s" % e), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     return 0
 
 
@@ -788,7 +792,7 @@ def main(argv=None):
             path = restore_checkpoint(args.root, args.restore)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         print("restored checkpoint: %s" % path)
         return 0
     if args.checkpoint:
@@ -805,7 +809,7 @@ def main(argv=None):
                 "{{task}}", task or "")
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
     if not task and not args.resume and not args.cont and not args.interactive \
             and not args.import_:
         print(red("give it a task, as an argument or on stdin"),
@@ -828,7 +832,7 @@ def main(argv=None):
             messages = load_session(args.resume)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
     if args.fork and messages is None:
         # branch off a saved session: same start, but saving later
         # needs an explicit name, so the original stays untouched
@@ -836,7 +840,7 @@ def main(argv=None):
             messages = load_session(args.fork)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         if not args.quiet and not args.print_mode:
             say(args, "forked from session: %s" % args.fork)
     if args.import_ and messages is None:
@@ -846,7 +850,7 @@ def main(argv=None):
             messages = import_history(args.import_)
         except (ValueError, OSError) as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         if not args.quiet and not args.print_mode:
             say(args, "imported %d messages from %s"
                       % (len(messages), args.import_))
@@ -855,12 +859,12 @@ def main(argv=None):
         if latest is None:
             print(red("error: no saved sessions to continue"),
                   file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         try:
             messages = load_session(latest)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         if not args.quiet and not args.print_mode:
             say(args, "continuing session: %s" % latest)
     if args.interactive and messages is None:
@@ -905,7 +909,10 @@ def main(argv=None):
                        parallel_tools=args.parallel_tools)
     except RuntimeError as e:
         print(red("error: %s" % e), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        print(red("\ncancelled"), file=sys.stderr)
+        return EXIT_CANCELLED
 
     step_no = sum(1 for m in messages
                   if m.get("role") == "assistant") + 1
@@ -913,6 +920,9 @@ def main(argv=None):
     if args.reflect and final and not final.startswith("stopped:"):
         messages = reflect_answer(args, chat_fn, messages, track, step_no)
         step_no += 1
+        final = last_answer(messages)
+    exit_code = EXIT_BUDGET if final == "stopped: hit cost budget" \
+        else EXIT_OK
     if args.schema and final and not final.startswith("stopped:"):
         messages = enforce_schema(args, chat_fn, messages, track, step_no)
 
@@ -942,7 +952,7 @@ def main(argv=None):
     if args.json:
         print(json.dumps(build_result(args, messages, totals, model_box),
                          indent=2))
-        return 0
+        return exit_code
 
     if args.output:
         # write the final answer to a file too, works with --print
@@ -961,14 +971,18 @@ def main(argv=None):
     if args.print_mode:
         # scripting mode: just the answer, nothing else
         print(last_answer(messages))
-        return 0
+        return exit_code
 
     if not args.quiet:
         print("---")
         print(cost_line)
     print(last_answer(messages))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print(red("\ncancelled"), file=sys.stderr)
+        sys.exit(EXIT_CANCELLED)
