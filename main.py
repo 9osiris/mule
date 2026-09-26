@@ -264,7 +264,7 @@ def build_result(args, messages, totals):
 
 def make_show(args):
     def show(step, calls):
-        if args.quiet or args.json:
+        if args.quiet or args.json or args.print_mode:
             return
         for c in calls:
             a = json.loads(c["function"].get("arguments") or "{}")
@@ -275,7 +275,7 @@ def make_show(args):
 
 def make_todos(args):
     def show_todos(line):
-        if not args.quiet and not args.json:
+        if not args.quiet and not args.json and not args.print_mode:
             print(line)
     return show_todos
 
@@ -288,7 +288,7 @@ def make_track(args, totals):
             pout = usage.get("completion_tokens", 0)
             totals["in"] += pin
             totals["out"] += pout
-            if not args.quiet and not args.json:
+            if not args.quiet and not args.json and not args.print_mode:
                 print("  [step %d: %s in / %s out, %s]" % (
                     step, "{:,}".format(pin), "{:,}".format(pout),
                     fmt_cost(cost_for(args.model, pin, pout))))
