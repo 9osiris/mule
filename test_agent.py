@@ -2617,6 +2617,30 @@ check("compress_history keeps system plus a recap",
       len(_cmp) == 2 and _cmp[0]["role"] == "system"
       and "we fixed the bug" in _cmp[1]["content"])
 
+# --- batch D: config and cli ---
+
+from main import apply_tool_gates
+
+_gt_tools = ToolSet(tempfile.mkdtemp())
+_gt_args = parse_args(["t", "--deny-tools", "run_shell, write_file"])
+apply_tool_gates(_gt_args, _gt_tools)
+check("--deny-tools disables the named tools",
+      "run_shell" in _gt_tools.disabled
+      and "write_file" in _gt_tools.disabled
+      and "read_file" not in _gt_tools.disabled)
+
+_gt_tools2 = ToolSet(tempfile.mkdtemp())
+_gt_args2 = parse_args(["t", "--allow-tools", "read_file, list_dir"])
+apply_tool_gates(_gt_args2, _gt_tools2)
+check("--allow-tools disables everything else",
+      "read_file" not in _gt_tools2.disabled
+      and "list_dir" not in _gt_tools2.disabled
+      and "run_shell" in _gt_tools2.disabled)
+check("--allow-tools parses",
+      parse_args(["t", "--allow-tools", "a,b"]).allow_tools == "a,b")
+check("--deny-tools parses",
+      parse_args(["t", "--deny-tools", "a"]).deny_tools == "a")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
