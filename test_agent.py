@@ -2021,6 +2021,36 @@ check("flags default to unset",
       and parse_args(["t"]).max_tokens is None
       and parse_args(["t"]).seed is None)
 
+# --continue picks up the most recent session
+
+from sessions import latest_session, save_session
+
+_cont_home = os.environ.get("HOME")
+os.environ["HOME"] = tempfile.mkdtemp()
+save_session("older", [{"role": "user", "content": "first"}])
+check("latest_session finds the only session",
+      latest_session() == "older")
+import time as _ctime
+_ctime.sleep(0.02)
+save_session("newer", [{"role": "user", "content": "second"}])
+check("latest_session picks the newest",
+      latest_session() == "newer")
+_real_client = _main_mod.ChatClient
+_main_mod.ChatClient = _FakePrintClient
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _rc = _main_mod.main(["follow up", "--continue", "--api-key", "x",
+                          "--root", tempfile.mkdtemp(), "--print"])
+_main_mod.ChatClient = _real_client
+check("--continue exits 0", _rc == 0)
+check("--continue prints only the final answer",
+      _buf.getvalue() == "the answer\n")
+check("--continue parses", parse_args(["--continue", "t"]).cont is True)
+if _cont_home is None:
+    os.environ.pop("HOME", None)
+else:
+    os.environ["HOME"] = _cont_home
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

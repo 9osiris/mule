@@ -48,6 +48,17 @@ def list_sessions():
     return sorted(f[:-6] for f in os.listdir(d) if f.endswith(".jsonl"))
 
 
+def latest_session():
+    # name of the most recently modified session, None when empty
+    d = session_dir()
+    paths = [os.path.join(d, f) for f in os.listdir(d)
+             if f.endswith(".jsonl")]
+    if not paths:
+        return None
+    newest = max(paths, key=os.path.getmtime)
+    return os.path.basename(newest)[:-6]
+
+
 def export_session(path, messages, cost_line=None):
     # readable markdown transcript: turns, tool calls, cost at the bottom
     lines = ["# mule session", ""]

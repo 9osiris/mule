@@ -8,7 +8,8 @@ from client import ChatClient
 from config import load_config, load_profile
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
-from sessions import save_session, load_session, list_sessions, auto_name
+from sessions import save_session, load_session, list_sessions, auto_name, \
+    latest_session
 from tools import ToolSet
 from ui import init_color, red, yellow
 
@@ -104,6 +105,8 @@ def build_parser(cfg):
                    help="cap on completion tokens per request")
     p.add_argument("--seed", type=int, default=None,
                    help="seed for reproducible outputs")
+    p.add_argument("--continue", dest="cont", action="store_true",
+                   help="pick up the most recent session")
     return p
 
 
@@ -455,7 +458,7 @@ def main(argv=None):
             say(args, "checkpoint saved: %s" % path)
 
     task = resolve_task(args, sys.stdin)
-    if not task and not args.resume and not args.interactive:
+    if not task and not args.resume and not args.cont and not args.interactive:
         print(red("give it a task, as an argument or on stdin"),
               file=sys.stderr)
         return 2
@@ -477,6 +480,19 @@ def main(argv=None):
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
             return 1
+    if args.cont and messages is None:
+        latest = latest_session()
+        if latest is None:
+            print(red("error: no saved sessions to continue"),
+                  file=sys.stderr)
+            return 1
+        try:
+            messages = load_session(latest)
+        except ValueError as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return 1
+        if not args.quiet and not args.print_mode:
+            say(args, "continuing session: %s" % latest)
     if args.interactive and messages is None:
         messages = [{"role": "system", "content": system}]
 
