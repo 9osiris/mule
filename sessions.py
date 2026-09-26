@@ -59,6 +59,63 @@ def latest_session():
     return os.path.basename(newest)[:-6]
 
 
+def search_sessions(query):
+    # find saved sessions containing the query, with a snippet each
+    q = (query or "").lower()
+    hits = []
+    for name in list_sessions():
+        try:
+            messages = load_session(name)
+        except (ValueError, OSError):
+            continue
+        for m in messages:
+            text = str(m.get("content") or "")
+            if q in text.lower():
+                i = text.lower().index(q)
+                snippet = text[max(0, i - 40):i + 80].replace("\n", " ")
+                hits.append((name, snippet.strip()))
+                break
+    return hits
+
+
+def rename_session(old, new):
+    # rename a saved session file
+    src, dst = _path(old), _path(new)
+    if not os.path.isfile(src):
+        raise ValueError("no such session: %s" % old)
+    if os.path.isfile(dst):
+        raise ValueError("session already exists: %s" % new)
+    os.rename(src, dst)
+    return dst
+
+
+def delete_session(name):
+    # remove a saved session file
+    path = _path(name)
+    if not os.path.isfile(path):
+        raise ValueError("no such session: %s" % name)
+    os.remove(path)
+    return path
+
+
+def session_stats():
+    # per-session message counts and file sizes
+    stats = []
+    for name in list_sessions():
+        path = _path(name)
+        count = 0
+        try:
+            with open(path) as f:
+                for line in f:
+                    if line.strip():
+                        count += 1
+        except OSError:
+            continue
+        stats.append({"name": name, "messages": count,
+                      "bytes": os.path.getsize(path)})
+    return stats
+
+
 def export_session(path, messages, cost_line=None):
     # readable markdown transcript: turns, tool calls, cost at the bottom
     lines = ["# mule session", ""]
