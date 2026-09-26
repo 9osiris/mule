@@ -325,6 +325,36 @@ check("streamed answer is the joined tokens",
 check("tool result fed back after streamed call",
       any(m["role"] == "tool" for m in smsgs))
 
+# some servers/proxies send data: null keepalives mid-stream;
+# the parser must skip them instead of crashing
+class NullChunkHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        payload = ("data: null\n\n"
+                   + sse({"content": "still"})
+                   + "data: null\n\n"
+                   + sse({"content": " here"})
+                   + "data: [DONE]\n\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *a):
+        pass
+
+
+nserver = HTTPServer(("127.0.0.1", 0), NullChunkHandler)
+threading.Thread(target=nserver.serve_forever, daemon=True).start()
+nclient = ChatClient("http://127.0.0.1:%d/v1" % nserver.server_port,
+                     "fake-key", "fake-model")
+nout = nclient.chat_stream([{"role": "user", "content": "hi"}])
+nserver.shutdown()
+check("null chunks in the stream are skipped",
+      nout.get("content") == "still here")
+
 sbodies = stream_seen["bodies"]
 sechoed = [m for m in sbodies[1]["messages"]
            if m.get("role") == "assistant" and m.get("tool_calls")] \

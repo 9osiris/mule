@@ -158,6 +158,9 @@ class ChatClient:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                # some servers send data: null keepalives
+                if not isinstance(chunk, dict):
+                    continue
                 if "usage" in chunk:
                     usage = chunk["usage"]
                 choices = chunk.get("choices") or [{}]
