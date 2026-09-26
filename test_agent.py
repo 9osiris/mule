@@ -252,7 +252,7 @@ check("tool result fed back after streamed call",
 
 # --no-stream flag parsing
 
-from main import parse_args, ask_cmd
+from main import parse_args, ask_cmd, build_parser, run_subcommand
 check("--no-stream defaults off",
       parse_args(["do things"]).no_stream is False)
 check("--no-stream flag turns on",
@@ -1503,6 +1503,39 @@ os.environ.clear()
 os.environ.update(_doc_env)
 config_mod.HOME_CONFIG, config_mod.LOCAL_CONFIG = _doc_orig
 _doc_srv.shutdown()
+
+# shell completions
+
+from complete import completion_script
+from cost import PRICING
+
+_parser = build_parser({})
+_real_flags = sorted({o for a in _parser._actions
+                      for o in a.option_strings if o.startswith("--")})
+_real_models = sorted(PRICING)
+
+for _shell in ("bash", "zsh", "fish"):
+    _script = completion_script(_shell, _real_flags, _real_models)
+    _needles = (["--max-cost", "--dry-run", "--json", "--no-color",
+                 "--context-budget", "--append-system"]
+                if _shell != "fish" else
+                ["max-cost", "dry-run", "json", "no-color",
+                 "context-budget", "append-system"])
+    check("completion %s mentions every real flag" % _shell,
+          all(f in _script for f in _needles))
+    check("completion %s mentions the subcommands" % _shell,
+          all(s in _script for s in
+              ["init", "config", "doctor", "completion", "models"]))
+    check("completion %s mentions priced models" % _shell,
+          "gpt-4o-mini" in _script)
+try:
+    completion_script("powershell", _real_flags, _real_models)
+    check("completion rejects unknown shells", False)
+except ValueError:
+    check("completion rejects unknown shells", True)
+
+check("completion usage errors without a shell",
+      run_subcommand("completion", []) == 2)
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

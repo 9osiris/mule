@@ -127,6 +127,18 @@ def run_subcommand(name, rest):
             if i + 1 < len(rest):
                 root = rest[i + 1]
         return run_doctor(root)
+    if name == "completion":
+        from complete import completion_script
+        from cost import PRICING
+        if not rest or rest[0] not in ("bash", "zsh", "fish"):
+            print("usage: mule completion bash|zsh|fish", file=sys.stderr)
+            return 2
+        parser = build_parser({})
+        flags = sorted({o for a in parser._actions
+                        for o in a.option_strings
+                        if o.startswith("--")})
+        print(completion_script(rest[0], flags, sorted(PRICING)), end="")
+        return 0
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
 
