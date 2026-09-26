@@ -1,5 +1,7 @@
 """interactive loop: type follow-up tasks, slash commands for the rest."""
 
+import os
+
 from cost import cost_for, fmt_cost
 
 HELP_TEXT = """slash commands:
@@ -11,6 +13,22 @@ HELP_TEXT = """slash commands:
   /undo        restore the most recently changed file"""
 
 
+def load_commands(commands_dir):
+    # .mule/commands/*.md become /name commands, content is the text
+    cmds = {}
+    if not os.path.isdir(commands_dir):
+        return cmds
+    for fname in sorted(os.listdir(commands_dir)):
+        if not fname.endswith(".md"):
+            continue
+        name = fname[:-3].strip().lower()
+        if not name:
+            continue
+        with open(os.path.join(commands_dir, fname)) as f:
+            cmds[name] = f.read().strip()
+    return cmds
+
+
 def parse_slash(line):
     # "/save foo bar" -> ("save", "foo bar"), "/quit" -> ("quit", "")
     parts = line[1:].split(None, 1)
@@ -20,12 +38,18 @@ def parse_slash(line):
 
 
 def handle_slash(line, ctx):
-    # ctx: write, tools, totals, model, save_fn
-    # returns "quit" to leave, "clear" to reset history, else None
+    # ctx: write, tools, totals, model, save_fn, commands
+    # returns "quit" to leave, "clear" to reset history,
+    # ("run", text) to run a custom command as the next task, else None
     write = ctx["write"]
+    commands = ctx.get("commands") or {}
     cmd, arg = parse_slash(line)
     if cmd == "help":
-        write(HELP_TEXT)
+        text = HELP_TEXT
+        if commands:
+            text += ("\ncustom:\n" + "\n".join(
+                "  /%s" % n for n in sorted(commands)))
+        write(text)
     elif cmd == "quit":
         return "quit"
     elif cmd == "clear":
@@ -42,6 +66,8 @@ def handle_slash(line, ctx):
             fmt_cost(cost_for(ctx["model"], t["in"], t["out"]))))
     elif cmd == "undo":
         write(ctx["tools"].undo_last())
+    elif cmd in commands:
+        return ("run", commands[cmd])
     else:
         write("unknown command: /%s (try /help)" % cmd)
     return None

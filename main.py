@@ -7,7 +7,7 @@ from agent import run, last_answer, load_system_prompt, plan_and_approve
 from client import ChatClient
 from config import load_config
 from cost import cost_for, fmt_cost
-from repl import repl_loop, handle_slash
+from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name
 from tools import ToolSet
 
@@ -165,18 +165,25 @@ def run_interactive(args, tools, system, messages, task,
                     chat_fn, show, track, totals, todos):
     # prompt loop: each line is a task, history carries over
     box = {"messages": messages}
+    commands = load_commands(
+        os.path.join(os.path.abspath(args.root), ".mule", "commands"))
 
     def save_fn(name):
         return save_session(name, box["messages"])
 
     ctx = {"write": print, "tools": tools, "totals": totals,
-           "model": args.model, "save_fn": save_fn}
+           "model": args.model, "save_fn": save_fn,
+           "commands": commands}
 
     def on_slash(line):
         action = handle_slash(line, ctx)
         if action == "clear":
             box["messages"] = [{"role": "system", "content": system}]
             print("history cleared")
+        elif isinstance(action, tuple) and action[0] == "run":
+            # a custom command becomes the next task
+            on_task(action[1])
+            return None
         return action
 
     def on_task(line):
