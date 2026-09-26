@@ -2641,6 +2641,15 @@ check("--allow-tools parses",
 check("--deny-tools parses",
       parse_args(["t", "--deny-tools", "a"]).deny_tools == "a")
 
+_ro_tools = ToolSet(tempfile.mkdtemp())
+apply_tool_gates(parse_args(["t", "--readonly"]), _ro_tools)
+check("--readonly disables writes and shell",
+      all(n in _ro_tools.disabled
+          for n in ("write_file", "edit_file", "apply_patch", "run_shell"))
+      and "read_file" not in _ro_tools.disabled
+      and "git_status" not in _ro_tools.disabled)
+check("--readonly parses", parse_args(["t", "--readonly"]).readonly is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

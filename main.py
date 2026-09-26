@@ -137,6 +137,8 @@ def build_parser(cfg):
                         "everything else is disabled")
     p.add_argument("--deny-tools", default=None, metavar="NAMES",
                    help="comma-separated tools to disable")
+    p.add_argument("--readonly", action="store_true",
+                   help="disable file writes and shell commands")
     return p
 
 
@@ -312,7 +314,10 @@ def ask_plan(plan):
 
 
 def apply_tool_gates(args, tools):
-    # --deny-tools, --allow-tools: shrink what the model may call
+    # --deny-tools, --allow-tools, --readonly: shrink what the model may call
+    if args.readonly:
+        for name in ("write_file", "edit_file", "apply_patch", "run_shell"):
+            tools.disable_tool(name)
     if args.deny_tools:
         for name in args.deny_tools.split(","):
             name = name.strip()
