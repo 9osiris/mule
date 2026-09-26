@@ -15,6 +15,8 @@ delegate hands a subtask to a subagent with its own history and returns
 a summary. delegates cannot delegate further.
 run_shell with background=true starts a background job and returns a job
 id. jobs lists them, job_output reads one, job_kill stops one.
+ask_user asks the human a question with 2-4 options, but only works in
+interactive or --ask mode. otherwise make your best guess and say so.
 
 Rules:
 - Read before you change. Look at the files involved first.

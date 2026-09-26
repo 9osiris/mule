@@ -196,6 +196,17 @@ def ask_cmd(command):
     return ans in ("y", "yes")
 
 
+def ask_user_cli(question, options):
+    # the human-in-the-loop gate for the ask_user tool
+    print(yellow("question: %s" % question))
+    for i, o in enumerate(options, 1):
+        print("  %d. %s" % (i, o))
+    ans = input("pick 1-%d or type your answer: " % len(options)).strip()
+    if ans.isdigit() and 1 <= int(ans) <= len(options):
+        return options[int(ans) - 1]
+    return ans or options[0]
+
+
 def ask_plan(plan):
     # the human-in-the-loop gate for --plan
     print(yellow("plan:"))
@@ -379,7 +390,10 @@ def main(argv=None):
             print(name)
         return 0
 
-    tools = ToolSet(args.root, confirm=ask_cmd if args.ask else None)
+    tools = ToolSet(args.root,
+                    confirm=ask_cmd if args.ask else None,
+                    ask=ask_user_cli
+                    if (args.interactive or args.ask) else None)
     if args.undo:
         print(tools.undo_last())
         return 0
@@ -409,6 +423,7 @@ def main(argv=None):
 
     client = ChatClient(args.base_url, args.api_key, args.model,
                         timeout=args.timeout, retries=args.retries)
+    tools.make_chat = lambda: make_chat_fn(args, client)
     system = resolve_system(args)
 
     messages = None

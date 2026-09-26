@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 14)
+      and len(seen["bodies"][0]["tools"]) == 15)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -1796,6 +1796,24 @@ check("killing a finished job says so",
       "already finished" in _btools.call("job_kill", {"id": "1"}))
 check("foreground run_shell still works",
       "exit 0" in _btools.call("run_shell", {"command": "echo fg"}))
+
+# ask_user tool
+
+_atools = ToolSet(root, ask=lambda q, opts: "picked: " + opts[1])
+_aout = _atools.call("ask_user", {"question": "which one?",
+                                  "options": json.dumps(["a", "b"])})
+check("ask_user returns the human's pick", _aout == "picked: b")
+_noask = ToolSet(root)
+check("ask_user without a human errors cleanly",
+      "best guess" in _noask.call(
+          "ask_user", {"question": "q?", "options": json.dumps(["a", "b"])}))
+check("ask_user needs 2-4 options",
+      _atools.call("ask_user", {"question": "q?",
+                                "options": json.dumps(["only"])}).startswith(
+          "error:"))
+check("ask_user needs valid json options",
+      _atools.call("ask_user", {"question": "q?",
+                                "options": "nope"}).startswith("error:"))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

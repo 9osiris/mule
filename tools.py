@@ -151,11 +151,13 @@ class BackupStore:
 
 
 class ToolSet:
-    def __init__(self, root, confirm=None, make_chat=None,
+    def __init__(self, root, confirm=None, ask=None, make_chat=None,
                  delegate_depth=0, max_delegates=3):
         self.root = os.path.abspath(root)
         # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
+        # ask(question, options) -> str, the human-in-the-loop for ask_user
+        self.ask = ask
         # make_chat() -> chat_fn for delegate subagents, None disables it
         self.make_chat = make_chat
         self.delegate_depth = delegate_depth
@@ -206,6 +208,13 @@ class ToolSet:
                 "description": "stop a running background job",
                 "parameters": {"id": "the job id"},
                 "run": self.job_kill,
+            },
+            "ask_user": {
+                "description": "ask the human a question with 2-4 options. "
+                               "only works in interactive or --ask mode.",
+                "parameters": {"question": "the question",
+                               "options": "json list of 2-4 option labels"},
+                "run": self.ask_user,
             },
             "delegate": {
                 "description": "hand a subtask to a subagent with its own history. "
@@ -430,6 +439,25 @@ class ToolSet:
             return "job #%d already finished" % jid
         self.jobs.kill(jid)
         return "killed job #%d" % jid
+
+    def ask_user(self, question="", options="[]"):
+        # the model asks the human something mid-run
+        if not question:
+            return "error: empty question"
+        try:
+            opts = json.loads(options or "[]")
+        except json.JSONDecodeError:
+            return "error: options was not valid json"
+        if not isinstance(opts, list) or not 2 <= len(opts) <= 4:
+            return "error: give 2 to 4 options as a json list"
+        opts = [str(o) for o in opts]
+        if not self.ask:
+            return ("error: cannot ask the user in non-interactive mode, "
+                    "proceed with your best guess and say what you assumed")
+        try:
+            return self.ask(question, opts)
+        except Exception as e:
+            return "error: asking failed: %s" % e
 
     def delegate(self, task="", system=""):
         # farm a subtask out to a fresh agent loop with its own history
