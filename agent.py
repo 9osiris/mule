@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 
 
@@ -106,7 +107,7 @@ def compact_messages(messages, chat, keep_last=10):
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         messages=None, usage_cb=None, on_todos=None, context_budget=None,
         dry_run=False, max_tools=None, time_limit=None, on_timing=None,
-        parallel_tools=False):
+        parallel_tools=False, tool_timeout=None):
     """the loop. chat(messages) -> assistant message dict, tools is a ToolSet.
     dry_run prints what would happen without executing any tool."""
     if messages is None:
@@ -141,7 +142,27 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
             # show the plan, touch nothing
             return "dry run, not executed: %s(%s)" % (
                 name, json.dumps(args, sort_keys=True))
-        return tools.call(name, args)
+        if tool_timeout is None:
+            return tools.call(name, args)
+        # slow tools get cut off, not waited on forever.
+        # the thread is a daemon, so a stuck tool can't
+        # hold the process open after mule exits.
+        import queue as queue_mod
+        q = queue_mod.Queue()
+
+        def _target():
+            try:
+                q.put(tools.call(name, args))
+            except Exception as e:  # tools.call stringifies, this is backup
+                q.put("error: %s" % e)
+
+        t = threading.Thread(target=_target, daemon=True)
+        t.start()
+        try:
+            return q.get(timeout=tool_timeout)
+        except queue_mod.Empty:
+            return "error: tool '%s' timed out after %ss" % (
+                name, tool_timeout)
 
     for step in range(max_steps):
         if deadline is not None and time.monotonic() >= deadline:
@@ -235,10 +256,10 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
 
 
 def _clean_reply(reply):
-    # keep only what the api needs back
-    msg = {"role": "assistant"}
-    if reply.get("content"):
-        msg["content"] = reply["content"]
+    # keep only what the api needs back. content is always present:
+    # some gateways reject assistant messages that carry tool calls
+    # but no content field at all.
+    msg = {"role": "assistant", "content": reply.get("content") or ""}
     if reply.get("tool_calls"):
         msg["tool_calls"] = reply["tool_calls"]
     return msg
