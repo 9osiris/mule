@@ -1638,6 +1638,22 @@ check("a pipe feeds the task when no arg is given",
 check("a tty with no arg gives no task",
       resolve_task(parse_args([]), _Tty()) is None)
 
+# system prompt overrides
+
+from main import resolve_system
+
+check("--system replaces the prompt",
+      resolve_system(parse_args(["t", "--system", "be terse"])) == "be terse")
+check("--append-system appends to the default",
+      resolve_system(parse_args(["t", "--append-system", "be terse"]))
+      .endswith("\n\nbe terse"))
+check("--system and --append-system combine",
+      resolve_system(parse_args(["t", "--system", "base",
+                                 "--append-system", "extra"]))
+      == "base\n\nextra")
+check("no flags keeps the default prompt",
+      "coding agent" in resolve_system(parse_args(["t"])))
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

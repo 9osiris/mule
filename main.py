@@ -343,6 +343,19 @@ def run_interactive(args, tools, system, messages, task,
     return 0
 
 
+def resolve_system(args):
+    # --system replaces the prompt, --system-prompt loads it from a
+    # file, otherwise prompt.md or the builtin. --append-system tacks
+    # extra instructions onto whichever one won.
+    if args.system:
+        system = args.system
+    else:
+        system = load_system_prompt(args.system_prompt)
+    if args.append_system:
+        system = system.rstrip() + "\n\n" + args.append_system
+    return system
+
+
 def resolve_task(args, stdin):
     # the task comes from the arg, from "-" (explicit stdin), or from
     # a pipe when stdin is not a tty
@@ -393,7 +406,7 @@ def main(argv=None):
 
     client = ChatClient(args.base_url, args.api_key, args.model,
                         timeout=args.timeout, retries=args.retries)
-    system = load_system_prompt(args.system_prompt)
+    system = resolve_system(args)
 
     messages = None
     if args.resume:
