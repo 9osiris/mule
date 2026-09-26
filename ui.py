@@ -5,10 +5,32 @@ import sys
 _enabled = not os.environ.get("NO_COLOR")
 
 
+def _windows_ansi():
+    # windows 10+: ask the console to interpret ansi escapes.
+    # true when colors will actually render on this terminal.
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_ulong()
+        if k.GetConsoleMode(h, ctypes.byref(mode)):
+            k.SetConsoleMode(h, mode.value | 4)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def init_color(no_color):
     # call once from main. the flag wins, then the env var.
+    # on windows without working ansi, color turns off entirely,
+    # so escapes never print as raw text.
     global _enabled
     _enabled = not (no_color or os.environ.get("NO_COLOR"))
+    if _enabled and not _windows_ansi():
+        _enabled = False
 
 
 def _wrap(code, text):
