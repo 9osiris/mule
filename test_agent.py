@@ -2654,6 +2654,22 @@ check("--readonly disables writes and shell",
       and "git_status" not in _ro_tools.disabled)
 check("--readonly parses", parse_args(["t", "--readonly"]).readonly is True)
 
+_nw_tools = ToolSet(tempfile.mkdtemp())
+apply_tool_gates(parse_args(["t", "--no-network"]), _nw_tools)
+check("--no-network disables the network tools",
+      all(n in _nw_tools.disabled
+          for n in ("fetch_url", "web_search", "http_post"))
+      and "read_file" not in _nw_tools.disabled)
+_nw_tools2 = ToolSet(tempfile.mkdtemp())
+_nw_args2 = parse_args(["t", "--no-network", "--allow-network"])
+apply_tool_gates(_nw_args2, _nw_tools2)
+check("--allow-network overrides --no-network",
+      not _nw_tools2.disabled)
+check("network flags parse",
+      parse_args(["t", "--no-network"]).no_network is True
+      and parse_args(["t"]).no_network is False
+      and parse_args(["t"]).allow_network is None)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

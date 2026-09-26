@@ -139,6 +139,13 @@ def build_parser(cfg):
                    help="comma-separated tools to disable")
     p.add_argument("--readonly", action="store_true",
                    help="disable file writes and shell commands")
+    p.add_argument("--allow-network", dest="allow_network",
+                   action="store_true", default=None,
+                   help="allow network tools (the default), overrides "
+                        "no_network in config")
+    p.add_argument("--no-network", dest="no_network",
+                   action="store_true",
+                   help="disable fetch_url, web_search, and http_post")
     return p
 
 
@@ -314,7 +321,13 @@ def ask_plan(plan):
 
 
 def apply_tool_gates(args, tools):
-    # --deny-tools, --allow-tools, --readonly: shrink what the model may call
+    # --deny-tools, --allow-tools, --readonly, --no-network:
+    # shrink what the model may call
+    if args.allow_network:
+        args.no_network = False
+    if args.no_network:
+        for name in ("fetch_url", "web_search", "http_post"):
+            tools.disable_tool(name)
     if args.readonly:
         for name in ("write_file", "edit_file", "apply_patch", "run_shell"):
             tools.disable_tool(name)
