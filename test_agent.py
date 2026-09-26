@@ -1271,6 +1271,42 @@ check("export skips the system prompt", "\nsys\n" not in xtext)
 check("--export parses",
       parse_args(["t", "--export", "out.md"]).export == "out.md")
 
+# multiple tool calls in one turn: all run, in order, results fed back
+
+mroot = tempfile.mkdtemp()
+mtools = ToolSet(mroot)
+mstate = {"n": 0}
+
+
+def mchat(messages, tools):
+    mstate["n"] += 1
+    if mstate["n"] == 1:
+        return {"role": "assistant", "tool_calls": [
+            tool_call("m1", "write_file",
+                      {"path": "a.txt", "content": "aaa"}),
+            tool_call("m2", "write_file",
+                      {"path": "b.txt", "content": "bbb"}),
+            tool_call("m3", "run_shell",
+                      {"command": "cat a.txt b.txt"}),
+        ]}
+    return {"role": "assistant", "content": "all three ran"}
+
+
+msteps = []
+mmsgs = run("make two files and cat them", mchat, mtools,
+            system_prompt="t", max_steps=5,
+            on_step=lambda s, calls: msteps.append(calls))
+mtool_msgs = [m for m in mmsgs if m["role"] == "tool"]
+check("all three calls ran in one turn", len(mtool_msgs) == 3)
+check("results came back in call order",
+      [m["tool_call_id"] for m in mtool_msgs] == ["m1", "m2", "m3"])
+check("later calls see earlier writes",
+      "aaabbb" in mtool_msgs[2]["content"].replace("\n", ""))
+check("on_step saw all three calls",
+      len(msteps) == 1 and len(msteps[0]) == 3)
+check("loop finished after the batch",
+      last_answer(mmsgs) == "all three ran")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
