@@ -3,7 +3,7 @@ import json
 import os
 
 KEYS = ("model", "base_url", "api_key", "max_steps", "timeout", "root",
-        "retries")
+        "retries", "context_budget")
 HOME_CONFIG = os.path.expanduser("~/.config/mule/mule.json")
 LOCAL_CONFIG = "mule.json"
 
