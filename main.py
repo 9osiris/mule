@@ -31,7 +31,16 @@ def parse_args(argv=None):
                    help="resume a saved session, then continue with the task")
     p.add_argument("--list-sessions", action="store_true",
                    help="list saved sessions and exit")
+    p.add_argument("--ask", action="store_true",
+                   help="ask for confirmation before each shell command")
     return p.parse_args(argv)
+
+
+def ask_cmd(command):
+    # the human-in-the-loop gate for --ask
+    print("run this? %s" % command)
+    ans = input("[y/N] ").strip().lower()
+    return ans in ("y", "yes")
 
 
 def main(argv=None):
@@ -52,7 +61,7 @@ def main(argv=None):
         print("set OPENAI_API_KEY or pass --api-key", file=sys.stderr)
         return 2
 
-    tools = ToolSet(args.root)
+    tools = ToolSet(args.root, confirm=ask_cmd if args.ask else None)
     client = ChatClient(args.base_url, args.api_key, args.model)
     system = load_system_prompt(args.system_prompt)
 

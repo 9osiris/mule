@@ -11,8 +11,10 @@ MAX_FETCH = 200_000  # cap on downloaded pages
 
 
 class ToolSet:
-    def __init__(self, root):
+    def __init__(self, root, confirm=None):
         self.root = os.path.abspath(root)
+        # confirm(command) -> bool, asked before every shell command
+        self.confirm = confirm
         self.tools = {
             "read_file": {
                 "description": "read a text file, path relative to project root",
@@ -130,6 +132,8 @@ class ToolSet:
         return "\n".join(lines) or "(empty)"
 
     def run_shell(self, command, timeout="30"):
+        if self.confirm and not self.confirm(command):
+            return "declined: the command was not run"
         try:
             timeout = float(timeout)
         except (TypeError, ValueError):

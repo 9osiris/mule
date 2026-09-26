@@ -252,7 +252,7 @@ check("tool result fed back after streamed call",
 
 # --no-stream flag parsing
 
-from main import parse_args
+from main import parse_args, ask_cmd
 check("--no-stream defaults off",
       parse_args(["do things"]).no_stream is False)
 check("--no-stream flag turns on",
@@ -460,6 +460,46 @@ check("fetch_url handles dead servers",
       ptools.call("fetch_url", {"url": "http://127.0.0.1:1/"})
       .startswith("error:"))
 pserver.shutdown()
+
+# --ask: human-in-the-loop shell confirmation
+
+asked = []
+
+
+def yes(cmd):
+    asked.append(cmd)
+    return True
+
+
+def no(cmd):
+    asked.append(cmd)
+    return False
+
+
+aroot = tempfile.mkdtemp()
+ytools = ToolSet(aroot, confirm=yes)
+ntools = ToolSet(aroot, confirm=no)
+gtools = ToolSet(aroot)  # default: no gate
+
+check("--ask yes runs the command",
+      "exit 0" in ytools.call("run_shell", {"command": "echo hi"}))
+check("--ask no skips it",
+      ntools.call("run_shell", {"command": "echo hi"}).startswith("declined:"))
+check("--ask asked with the command", asked == ["echo hi", "echo hi"])
+check("no gate means no asking",
+      "exit 0" in gtools.call("run_shell", {"command": "echo hi"}))
+check("--ask flag parses", parse_args(["--ask", "task"]).ask is True)
+check("--ask defaults off", parse_args(["task"]).ask is False)
+
+import builtins
+real_input = builtins.input
+builtins.input = lambda *a: "y"
+check("ask_cmd yes is yes", ask_cmd("ls") is True)
+builtins.input = lambda *a: "n"
+check("ask_cmd no is no", ask_cmd("ls") is False)
+builtins.input = lambda *a: ""
+check("ask_cmd empty is no", ask_cmd("ls") is False)
+builtins.input = real_input
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

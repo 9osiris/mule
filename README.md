@@ -38,6 +38,7 @@ python main.py "summarize the repo layout" \
   (auto-names with a timestamp if no name given)
 - `--resume NAME` - resume a saved session, then continue with the task
 - `--list-sessions` - list saved sessions and exit
+- `--ask` - ask for confirmation before each shell command
 
 responses stream by default: tokens print as they arrive. pass
 `--no-stream` to go back to waiting for the whole reply.
@@ -84,7 +85,8 @@ this thing runs shell commands for you. only point `--root` at
 directories you don't mind being changed, and read the task output.
 run_shell has a timeout and refuses interactive commands by design
 (they'd just hang until the timeout), but a model can still do
-dumb stuff like `rm -rf` inside the root. you were warned.
+dumb stuff like `rm -rf` inside the root. pass `--ask` to approve
+every shell command yourself before it runs. you were warned.
 
 ## tests
 
