@@ -1654,6 +1654,38 @@ check("--system and --append-system combine",
 check("no flags keeps the default prompt",
       "coding agent" in resolve_system(parse_args(["t"])))
 
+# --no-color and NO_COLOR
+
+import ui
+
+_old_nocolor = os.environ.pop("NO_COLOR", None)
+ui.init_color(False)
+check("errors are red by default",
+      ui.red("error: x").startswith("\033[31m"))
+check("diff plus lines are green",
+      "\033[32m+new" in ui.color_diff("+new\n-old\n ctx\n"))
+check("diff minus lines are red",
+      "\033[31m-old" in ui.color_diff("+new\n-old\n ctx\n"))
+_colored = ui.color_diff("+new\n-old\n ctx\n")
+check("diff context lines stay plain",
+      " ctx\n" in _colored
+      and "\033[32m ctx" not in _colored
+      and "\033[31m ctx" not in _colored)
+ui.init_color(True)
+check("--no-color disables color", ui.red("error: x") == "error: x")
+check("--no-color disables diff color",
+      ui.color_diff("+new\n") == "+new\n")
+os.environ["NO_COLOR"] = "1"
+ui.init_color(False)
+check("NO_COLOR env disables color", ui.red("error: x") == "error: x")
+if _old_nocolor is None:
+    os.environ.pop("NO_COLOR", None)
+else:
+    os.environ["NO_COLOR"] = _old_nocolor
+ui.init_color(False)
+check("--no-color parses",
+      parse_args(["t", "--no-color"]).no_color is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)

@@ -10,6 +10,7 @@ from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name
 from tools import ToolSet
+from ui import init_color, red, yellow
 
 
 def _num(env_raw, cfg_raw, default, cast):
@@ -112,7 +113,7 @@ def run_subcommand(name, rest):
         try:
             created = init_project(target, force=force)
         except FileExistsError as e:
-            print("error: %s" % e, file=sys.stderr)
+            print(red("error: %s" % e), file=sys.stderr)
             return 1
         for path in created:
             print("created %s" % path)
@@ -183,21 +184,21 @@ def cmd_config(rest):
             config_unset(args[1], global_)
             print("unset %s" % args[1])
     except KeyError as e:
-        print("error: %s" % e, file=sys.stderr)
+        print(red("error: %s" % e), file=sys.stderr)
         return 1
     return 0
 
 
 def ask_cmd(command):
     # the human-in-the-loop gate for --ask
-    print("run this? %s" % command)
+    print(yellow("run this? %s" % command))
     ans = input("[y/N] ").strip().lower()
     return ans in ("y", "yes")
 
 
 def ask_plan(plan):
     # the human-in-the-loop gate for --plan
-    print("plan:")
+    print(yellow("plan:"))
     print(plan)
     ans = input("[y]es / [n]o / [r]evise: ").strip().lower()
     if ans in ("r", "revise"):
@@ -321,7 +322,7 @@ def run_interactive(args, tools, system, messages, task,
                                   context_budget=args.context_budget,
                                   dry_run=args.dry_run)
         except RuntimeError as e:
-            print("error: %s" % e)
+            print(red("error: %s" % e))
             return
         if not args.quiet:
             print("---")
@@ -371,6 +372,7 @@ def main(argv=None):
     if argv and argv[0] in SUBCOMMANDS:
         return run_subcommand(argv[0], argv[1:])
     args = parse_args(argv)
+    init_color(args.no_color)
 
     if args.list_sessions:
         for name in list_sessions():
@@ -386,7 +388,7 @@ def main(argv=None):
         try:
             path = restore_checkpoint(args.root, args.restore)
         except ValueError as e:
-            print("error: %s" % e, file=sys.stderr)
+            print(red("error: %s" % e), file=sys.stderr)
             return 1
         print("restored checkpoint: %s" % path)
         return 0
@@ -398,10 +400,11 @@ def main(argv=None):
 
     task = resolve_task(args, sys.stdin)
     if not task and not args.resume and not args.interactive:
-        print("give it a task, as an argument or on stdin", file=sys.stderr)
+        print(red("give it a task, as an argument or on stdin"),
+              file=sys.stderr)
         return 2
     if not args.api_key:
-        print("set OPENAI_API_KEY or pass --api-key", file=sys.stderr)
+        print(red("set OPENAI_API_KEY or pass --api-key"), file=sys.stderr)
         return 2
 
     client = ChatClient(args.base_url, args.api_key, args.model,
@@ -413,7 +416,7 @@ def main(argv=None):
         try:
             messages = load_session(args.resume)
         except ValueError as e:
-            print("error: %s" % e, file=sys.stderr)
+            print(red("error: %s" % e), file=sys.stderr)
             return 1
     if args.interactive and messages is None:
         messages = [{"role": "system", "content": system}]
@@ -450,7 +453,7 @@ def main(argv=None):
                        context_budget=args.context_budget,
                        dry_run=args.dry_run)
     except RuntimeError as e:
-        print("error: %s" % e, file=sys.stderr)
+        print(red("error: %s" % e), file=sys.stderr)
         return 1
 
     if args.save:
