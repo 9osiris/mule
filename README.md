@@ -23,6 +23,16 @@ python main.py "summarize the repo layout" \
   --root ./myproject
 ```
 
+agentrouter works too (mule sends the client headers its waf wants):
+
+```bash
+python main.py "check this for errors" \
+  --base-url https://agentrouter.org/v1 \
+  --api-key $AGENTROUTER_API_KEY \
+  --model gpt-4o-mini \
+  --root ./myproject
+```
+
 ## flags
 
 - `task` - what to do (or pipe it on stdin)
@@ -69,12 +79,47 @@ python main.py "summarize the repo layout" \
 - `--seed N` - seed for reproducible outputs
 - `--continue` - pick up the most recent saved session, then continue
   with the task
+- `--stop SEQS` - comma-separated stop sequences sent to the api
+- `--max-tools N` - stop the loop after N tool calls total
+- `--time-limit SEC` - stop the loop after SEC seconds
+- `--parallel-tools` - run independent tool calls in the same step
+  together (results stay in order)
+- `--tool-timeout SEC` - cut off any single tool call after SEC
+  seconds instead of waiting on it
+- `--reflect` - after answering, the model critiques and improves
+  its own answer once
+- `--fallback-model NAME` - if the primary model errors, retry the
+  failed call once on this model
+- `--schema KEYS` - comma-separated keys the final answer must be a
+  json object containing (the model gets one fix-up try)
+- `--fork NAME` - start from a saved session's history without
+  touching the original
+- `--search-sessions QUERY` - search saved sessions and exit
+- `--verbose` - show per-step timing and token lines
+- `--allow-tools LIST` - comma-separated tools the model may call,
+  everything else is hidden
+- `--deny-tools LIST` - comma-separated tools the model may not call
+- `--readonly` - disable every tool that writes: no file writes,
+  no shell, no network posts
+- `--no-network` - disable `fetch_url`, `web_search`, `http_post`
+- `--allow-network URL` - re-enable one host after `--no-network`
+- `--template NAME` - run the task through
+  `.mule/templates/NAME.md`; `{{task}}` becomes your task text
+- `--import FILE` - start from a `.md` or `.jsonl` history file
+- `--log-file FILE` - append all output to FILE as well as the terminal
+- `--trace FILE` - write raw api request/response pairs to FILE as
+  jsonl (the api key is never recorded)
+- `--version` - print the version and exit
+
+exit codes: `0` ok, `2` cost budget hit or usage error, `3` runtime
+error, `130` you pressed ctrl-c.
 
 ## subcommands
 
 - `mule init [--force]` - scaffold a project: writes a starter
-  `mule.json`, a `prompt.md` template, and an example command in
-  `.mule/commands/`. refuses to overwrite unless `--force`.
+  `mule.json`, a `prompt.md` template, an example command in
+  `.mule/commands/`, and an example task template in
+  `.mule/templates/`. refuses to overwrite unless `--force`.
 - `mule config [--global] get KEY | set KEY VALUE | unset KEY | list`
   - read and write config values from the cli. writes the local
   `mule.json` by default, `--global` targets `~/.config/mule/mule.json`.
@@ -88,6 +133,12 @@ python main.py "summarize the repo layout" \
   never drifts.
 - `mule models` - table of priced models ($/1M tokens in/out) from
   `cost.py`, no api call needed.
+- `mule sessions rename OLD NEW | rm NAME | stats` - rename or
+  delete a saved session, or show per-session message counts.
+- `mule help tools|config|sessions|examples` - topic help.
+- `mule examples` - copy-pasteable example invocations.
+- `mule demo` - run the whole loop against a fake local model, no
+  api key needed. good for kicking the tires.
 
 the task can also come from stdin: `echo "fix the bug" | mule`
 or `mule -` reads it explicitly.
@@ -97,7 +148,12 @@ or `mule -` reads it explicitly.
 `mule.json` in the current directory sets defaults, and
 `~/.config/mule/mule.json` sets global ones. the local file wins
 over the global one. recognized keys: `model`, `base_url`,
-`api_key`, `max_steps`, `timeout`, `retries`, `context_budget`, `root`.
+`api_key`, `max_steps`, `timeout`, `retries`, `context_budget`, `root`,
+`ask`, `reflect`, `verbose`, `parallel_tools`, `readonly`, `no_network`,
+`allow_tools`, `deny_tools`, `fallback_model`, `max_tools`, `time_limit`,
+`temperature`, `log_file`, `trace`, `tool_timeout`. unknown keys and
+wrong types get a warning on stderr naming the file, the key, and
+what it should be.
 
 ```json
 {
@@ -126,6 +182,28 @@ python main.py "add tests for the parser" --save parser-work
 python main.py --resume parser-work "now fix the failing test"
 ```
 
+every run auto-saves (timestamped) even without `--save`, so
+`--continue`, `--search-sessions`, and `mule sessions stats` always
+have something to find. manage them:
+
+```bash
+mule --search-sessions "parser bug"
+mule sessions rename session-20260926-120000 parser-work
+mule sessions rm parser-work
+mule sessions stats
+mule --fork parser-work "try a different approach"
+```
+
+## templates
+
+`--template NAME` reads `.mule/templates/NAME.md` and substitutes
+`{{task}}` with your task text, so the template wraps the task.
+`mule init` ships a `review` example:
+
+```bash
+mule --template review "main.py"
+```
+
 ## interactive mode
 
 `--interactive` starts a prompt loop. type a task, get an answer,
@@ -138,7 +216,16 @@ turns. slash commands:
 - `/save NAME` - save the session to `~/.mule/sessions/`
 - `/cost` - show tokens and spend so far
 - `/tools` - list available tools
+- `/tools off NAME` / `/tools on NAME` - disable or re-enable a
+  tool for this session
+- `/model [NAME]` - show the current model or switch it mid-run
+- `/retry` - run the last task again
+- `/compress` - squash history into a short recap to free context
 - `/undo` - restore the most recently changed file
+- `/bug [TEXT]` - print a prefilled github issue url for the repo
+
+wrap input in triple backticks for multiline tasks. prompt history
+persists across runs in `~/.mule/history` (up/down arrows work).
 
 drop markdown files in `<root>/.mule/commands/` and they become
 custom slash commands: `review.md` becomes `/review`, and its
@@ -250,12 +337,22 @@ system prompt. `plugins.py` loads python tool plugins from
 - `read_file` - read a text file
 - `write_file` - write a whole file (creates parent dirs, overwrites)
 - `edit_file` - replace one exact string in a file, must match once
+- `apply_patch` - atomic batch of {path, old, new} edits across
+  files: every old string must match exactly once or nothing applies
 - `list_dir` - list a directory
+- `tree` - directory structure as a tree
+- `find` - locate files by name pattern
+- `grep` - search file contents for a regex
+- `read_many` - read up to 10 files in one call
+- `file_info` - size, mtime, and type for a path
 - `run_shell` - run a shell command in the project root; pass
   `background=true` to get a job id back instead of output
+- `git_status`, `git_diff`, `git_log` - read-only git inspection
 - `fetch_url` - fetch a web page, html stripped to rough text
 - `web_search` - search the web via duckduckgo, returns titles,
   urls, and snippets
+- `http_post` - post to a url (only works in `--ask` mode, after
+  confirmation)
 - `todo_write` - replace the todo list (json list of {text, status})
 - `todo_read` - show the current todo list
 - `read_image` - load a png/jpg/gif/webp as a base64 data uri
@@ -276,6 +373,35 @@ run_shell has a timeout and refuses interactive commands by design
 dumb stuff like `rm -rf` inside the root. pass `--ask` to approve
 every shell command and file write yourself before it runs (file
 writes show a diff first). you were warned.
+
+on top of that:
+
+- a denylist always refuses the truly awful stuff: writing to raw
+  disks (`> /dev/sda`), `chmod -R 777 /`. no prompt, just refused.
+- `rm -rf /`, `mkfs`, `dd` to a device, and fork bombs need the
+  literal word `yes` typed in `--ask` mode. without a human at the
+  keyboard they are refused outright.
+- when a file read looks like it contains secrets (api keys,
+  tokens, private keys, `password = ...`), you get a loud warning
+  before it goes to the model.
+- `--readonly` turns off every writing tool; `--no-network` turns
+  off the network ones; `--allow-tools`/`--deny-tools` pick exactly
+  which tools the model may call.
+
+## exit codes
+
+`0` the run finished, `2` the cost budget was hit (or you misused a
+flag), `3` something failed at runtime, `130` you pressed ctrl-c.
+script against them: `mule --print "task" || echo "failed: $?"`.
+
+## the look
+
+mule has a face: a geometric mule head in bold amber opens every
+run, tool calls render as bordered panels, a spinner ticks while
+the model thinks, and a footer closes the run with the model,
+token counts, and cost. full spec in `BRANDING.md`. `--no-color`
+(or the `NO_COLOR` env var) turns all of it off; `--print`,
+`--json`, and `--quiet` never show it in the first place.
 
 ## tests
 
