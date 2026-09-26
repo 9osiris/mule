@@ -46,3 +46,32 @@ def load_session(name):
 def list_sessions():
     d = session_dir()
     return sorted(f[:-6] for f in os.listdir(d) if f.endswith(".jsonl"))
+
+
+def export_session(path, messages, cost_line=None):
+    # readable markdown transcript: turns, tool calls, cost at the bottom
+    lines = ["# mule session", ""]
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            continue
+        if role == "user":
+            lines += ["## user", "", str(m.get("content") or ""), ""]
+        elif role == "assistant":
+            lines += ["## assistant", ""]
+            if m.get("content"):
+                lines += [str(m["content"]), ""]
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                lines += ["```",
+                          "%s %s" % (fn.get("name"),
+                                     fn.get("arguments") or ""),
+                          "```", ""]
+        elif role == "tool":
+            lines += ["> tool result", "", "```",
+                      str(m.get("content") or ""), "```", ""]
+    if cost_line:
+        lines += ["## cost", "", cost_line, ""]
+    with open(path, "w") as f:
+        f.write("\n".join(lines).rstrip() + "\n")
+    return path

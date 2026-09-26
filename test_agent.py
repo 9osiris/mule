@@ -1244,6 +1244,33 @@ check("/help lists custom commands",
 check("builtins still win over customs",
       handle_slash("/quit", cctx) == "quit")
 
+# session export to markdown
+
+from sessions import export_session
+
+xmsgs = [
+    {"role": "system", "content": "sys"},
+    {"role": "user", "content": "write hi.txt"},
+    {"role": "assistant", "tool_calls": [tool_call("e1", "write_file",
+            {"path": "hi.txt", "content": "hi"})]},
+    {"role": "tool", "tool_call_id": "e1", "content": "wrote 2 bytes"},
+    {"role": "assistant", "content": "done"},
+]
+xpath = os.path.join(tempfile.mkdtemp(), "out.md")
+export_session(xpath, xmsgs,
+               cost_line="tokens: 10 in / 5 out, cost $0.0000")
+xtext = open(xpath).read()
+check("export has user turns", "## user\n\nwrite hi.txt" in xtext)
+check("export has assistant turns", "## assistant\n\ndone" in xtext)
+check("export shows tool calls as code blocks",
+      "```\nwrite_file" in xtext and '"path": "hi.txt"' in xtext)
+check("export shows tool results", "wrote 2 bytes" in xtext)
+check("export ends with the cost line",
+      xtext.rstrip().endswith("cost $0.0000"))
+check("export skips the system prompt", "\nsys\n" not in xtext)
+check("--export parses",
+      parse_args(["t", "--export", "out.md"]).export == "out.md")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
