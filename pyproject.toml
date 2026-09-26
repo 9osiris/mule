@@ -21,4 +21,4 @@ mule = "main:main"
 [tool.setuptools]
 py-modules = ["main", "agent", "client", "tools", "ui", "repl",
               "config", "cost", "doctor", "sessions", "checkpoints",
-              "complete", "plugins", "scaffold", "skills"]
+              "complete", "plugins", "scaffold", "skills", "serve"]

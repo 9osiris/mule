@@ -135,7 +135,12 @@ error, `130` you pressed ctrl-c.
   `cost.py`, no api call needed.
 - `mule sessions rename OLD NEW | rm NAME | stats` - rename or
   delete a saved session, or show per-session message counts.
-- `mule help tools|config|sessions|examples` - topic help.
+- `mule serve [--port 8321] [--no-browser]` - local web chat ui,
+  gpt4all-style: sidebar with sessions, streaming markdown, tool
+  calls shown as a compact transcript. one self-contained page,
+  no build step, no external requests. bound to 127.0.0.1 only,
+  shares every model/root flag with a normal run.
+- `mule help tools|config|sessions|serve|examples` - topic help.
 - `mule examples` - copy-pasteable example invocations.
 - `mule demo` - run the whole loop against a fake local model, no
   api key needed. good for kicking the tires.
@@ -246,6 +251,26 @@ file changes are backed up before every write or edit, so `/undo`
 (or `--undo` for one-shot runs) restores the most recent one. in
 `--ask` mode, file writes show a unified diff in the confirmation
 prompt before anything is applied.
+
+## web ui
+
+`mule serve` starts a local chat app in your browser, in the style
+of gpt4all's desktop ui: a sidebar with your saved sessions, a
+composer, streamed markdown replies, and tool calls rendered as a
+compact transcript you can expand. everything is one
+self-contained page (`webui.html`): no build step, no cdn, no
+external requests, and the server only listens on 127.0.0.1.
+
+```bash
+mule serve                                # opens http://127.0.0.1:8321/
+mule serve --port 9000 --root ~/proj --model deepseek-v4-flash
+mule serve --no-browser                   # just print the url
+```
+
+chats in the web ui save to the same `~/.mule/sessions/` files as
+the cli, so you can start in the browser and resume with
+`mule --resume NAME`. one chat runs at a time; a second request
+while one is streaming gets a 409 until it finishes.
 
 ## cost tracking
 
@@ -435,7 +460,10 @@ first place.
 
 ```bash
 python test_agent.py
+python test_serve.py
 ```
 
 spins a fake openai-compatible server locally and runs the full loop
-through it, no api key needed.
+through it, no api key needed. `test_serve.py` boots the real web
+server on a temp port with a fake client and exercises every
+endpoint, including the sse chat stream.

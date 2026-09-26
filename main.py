@@ -206,7 +206,7 @@ def parse_args(argv=None):
 
 
 SUBCOMMANDS = ("init", "config", "doctor", "completion", "models",
-               "sessions", "help", "examples", "demo")
+               "sessions", "serve", "help", "examples", "demo")
 
 
 def run_subcommand(name, rest):
@@ -254,6 +254,9 @@ def run_subcommand(name, rest):
         return 0
     if name == "sessions":
         return cmd_sessions(rest)
+    if name == "serve":
+        from serve import cmd_serve
+        return cmd_serve(rest)
     if name == "help":
         return cmd_help(rest)
     if name == "examples":
@@ -366,6 +369,12 @@ reflect, readonly, no_network, allow_tools...""",
   mule sessions rm NAME           delete one
   mule sessions stats             message counts""",
     "examples": EXAMPLES,
+    "serve": """a local web chat ui, gpt4all-style. one page, no build
+step, no external requests, bound to 127.0.0.1 only.
+  mule serve                      open http://127.0.0.1:8321/
+  mule serve --port 9000          pick a port
+  mule serve --no-browser         print the url, don't open it
+shares --model, --root, and every other run flag.""",
 }
 
 
