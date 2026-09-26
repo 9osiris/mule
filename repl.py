@@ -1,8 +1,11 @@
 """interactive loop: type follow-up tasks, slash commands for the rest."""
 
 import os
+import re
+import subprocess
 
 from cost import cost_for, fmt_cost
+from ui import dim
 
 HELP_TEXT = """slash commands:
   /help        show this help
@@ -18,7 +21,55 @@ HELP_TEXT = """slash commands:
   /compress    summarize history into a short recap
   /undo        restore the most recently changed file
   /bug [TEXT]  print a prefilled github issue url
+extras:
+  !CMD         run a shell command directly, no agent involved
+  @PATH        attach a file's contents to your task
 tip: wrap input in ``` blocks for multiline tasks"""
+
+
+# @path or @"my file.py": pulled from the project root, dropped
+# into a code fence before the task runs. missing files and
+# paths escaping the root are left alone.
+_AT_RE = re.compile(r"(?<!\S)@(\"[^\"\n]+\"|'[^'\n]+'|[\w.\-\\/]+)")
+
+
+def expand_at_refs(line, root):
+    def _put(m):
+        path = m.group(1).strip("\"'")
+        full = os.path.normpath(os.path.join(root, path))
+        if not full.startswith(os.path.abspath(root) + os.sep):
+            return m.group(0)
+        if not os.path.isfile(full):
+            return m.group(0)
+        try:
+            with open(full, errors="replace") as f:
+                content = f.read()
+        except OSError:
+            return m.group(0)
+        if len(content) > 30000:
+            content = content[:30000] + "\n... (truncated)"
+        return "\n```%s\n%s\n```\n" % (path, content)
+    return _AT_RE.sub(_put, line)
+
+
+def run_shell_line(cmd, write):
+    # "!ls -la" from the repl: run it now, show the output,
+    # stay in the loop. the agent never sees it.
+    cmd = cmd.strip()
+    if not cmd:
+        write("usage: !COMMAND")
+        return
+    try:
+        p = subprocess.run(cmd, shell=True, capture_output=True,
+                           text=True, timeout=180)
+    except Exception as e:
+        write("error: %s" % e)
+        return
+    out = ((p.stdout or "") + (p.stderr or "")).rstrip()
+    if out:
+        write(out)
+    if p.returncode:
+        write(dim("exit %d" % p.returncode))
 
 
 def load_commands(commands_dir):
@@ -124,11 +175,15 @@ def handle_slash(line, ctx):
     return None
 
 
-def repl_loop(read_line, write, on_task, on_slash, prompt="> "):
+def repl_loop(read_line, write, on_task, on_slash, prompt="\u276f ",
+              root=None):
     # read_line(prompt) raises EOFError/KeyboardInterrupt to leave.
     # a line starting with ``` opens a multiline block: everything
     # until the closing ``` becomes one task.
-    write("interactive mode. /help for commands, /quit to leave.")
+    # a line starting with ! runs a shell command directly.
+    # @path in a task pulls that file into a code fence first.
+    write("interactive mode. /help for commands, /quit to leave. "
+          "!cmd runs shell, @file attaches a file.")
     while True:
         try:
             line = read_line(prompt)
@@ -149,10 +204,15 @@ def repl_loop(read_line, write, on_task, on_slash, prompt="> "):
         line = line.strip()
         if not line:
             continue
+        if line.startswith("!"):
+            run_shell_line(line[1:], write)
+            continue
         if line.startswith("/"):
             if on_slash(line) == "quit":
                 break
             continue
+        if root and "@" in line:
+            line = expand_at_refs(line, root)
         on_task(line)
 
 

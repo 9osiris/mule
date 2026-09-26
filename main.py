@@ -19,9 +19,9 @@ from sessions import save_session, load_session, list_sessions, auto_name, \
     latest_session, search_sessions, rename_session, delete_session, \
     session_stats
 from tools import ToolSet
-from ui import init_color, red, yellow, tool_panel, \
-    run_banner, step_line, welcome_screen, \
-    status_footer, Spinner
+from ui import init_color, red, yellow, get_renderer, ThreadSpinner, \
+    args_summary, run_banner, step_line, \
+    status_footer
 
 
 def _num(env_raw, cfg_raw, default, cast):
@@ -550,8 +550,9 @@ def make_chat_fn(args, client):
         if args.no_stream or getattr(args, "print_mode", False):
             if getattr(args, "print_mode", False) or args.quiet or args.json:
                 return _once(client.chat, messages, tools, stop=stop)
-            # waiting on the model: tick the spinner meanwhile.
-            # silent unless stdout is a real terminal.
+            # waiting on the model: spinner on its own thread, first
+            # frame after a short delay so fast replies never
+            # flicker. silent unless stdout is a real terminal.
             import threading
             box = {}
 
@@ -563,27 +564,50 @@ def make_chat_fn(args, client):
                     box["error"] = e
 
             t = threading.Thread(target=_call, daemon=True)
+            spin = ThreadSpinner("thinking")
             t.start()
-            spin = Spinner("thinking")
-            while t.is_alive():
-                spin.tick()
-                t.join(0.1)
-            spin.done()
+            spin.start()
+            t.join()
+            spin.stop()
             if "error" in box:
                 raise box["error"]
             return box["reply"]
-        printed = []
+        # streaming: spinner until the first token lands, then the
+        # reply renders live. markdown + syntax highlighting when
+        # rich is installed, raw tokens otherwise.
+        renderer = get_renderer()
+        live_ok = renderer.name == "rich"
+        spin = ThreadSpinner("thinking")
+        spin.start()
+        stream = None
+        raw = False
 
         def on_token(t):
+            nonlocal stream, raw
             if args.quiet or args.json:
                 return
-            print(t, end="", flush=True)
-            printed.append(t)
+            if stream is None and not raw:
+                spin.stop()
+                if live_ok:
+                    stream = renderer.stream()
+                else:
+                    raw = True
+            if stream is not None:
+                stream.feed(t)
+            else:
+                sys.stdout.write(t)
+                sys.stdout.flush()
 
-        reply = _once(client.chat_stream, messages, tools,
-                      on_token=on_token, stop=stop)
-        if printed and not args.quiet and not args.json:
-            print()
+        try:
+            reply = _once(client.chat_stream, messages, tools,
+                          on_token=on_token, stop=stop)
+        finally:
+            spin.stop()
+            if stream is not None:
+                stream.finish()
+            elif raw:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
         return reply
 
     chat_fn.model_box = model_box
@@ -620,15 +644,28 @@ def build_result(args, messages, totals, model_box=None):
 
 
 def make_show(args):
+    renderer = get_renderer()
+
     def show(step, calls):
         if args.quiet or args.json or args.print_mode:
             return
         for c in calls:
             a = json.loads(c["function"].get("arguments") or "{}")
-            summary = "\n".join("%s=%s" % (k, str(v)[:60])
-                                for k, v in a.items())
-            print(tool_panel(c["function"]["name"], summary))
+            renderer.tool_call(c["function"]["name"], args_summary(a))
     return show
+
+
+def make_results(args):
+    # tool results print nested under their call: first line plus
+    # a "+N lines" count. wired to agent.run via on_result.
+    renderer = get_renderer()
+
+    def on_result(step, calls, results):
+        if args.quiet or args.json or args.print_mode:
+            return
+        for r in results:
+            renderer.tool_result(r)
+    return on_result
 
 
 def make_todos(args):
@@ -736,6 +773,8 @@ def run_interactive(args, tools, system, messages, task,
     # prompt loop: each line is a task, history carries over
     from repl import compress_history
     box = {"messages": messages}
+    renderer = get_renderer()
+    results = make_results(args)
     commands = load_commands(
         os.path.join(os.path.abspath(args.root), ".mule", "commands"))
 
@@ -773,6 +812,7 @@ def run_interactive(args, tools, system, messages, task,
                                   system_prompt=system,
                                   max_steps=args.max_steps,
                                   on_step=show,
+                                  on_result=results,
                                   messages=box["messages"],
                                   usage_cb=track,
                                   on_todos=todos,
@@ -781,9 +821,12 @@ def run_interactive(args, tools, system, messages, task,
         except RuntimeError as e:
             print(red("error: %s" % e))
             return
-        if not args.quiet:
-            print("---")
-        print(last_answer(box["messages"]))
+        answer = last_answer(box["messages"])
+        if getattr(args, "print_mode", False) or args.quiet or args.json:
+            print(answer)
+        else:
+            renderer.rule()
+            renderer.print_markdown(answer)
 
     if task:
         # a task on the command line runs first, then the loop takes over
@@ -797,8 +840,8 @@ def run_interactive(args, tools, system, messages, task,
         tips = ["/help for commands, /quit to leave",
                 "/model NAME to switch models mid-session",
                 "wrap input in ``` blocks for multiline tasks"]
-        print(welcome_screen(__version__, ctx["model"],
-                             os.path.abspath(args.root), recent, tips))
+        renderer.welcome(__version__, ctx["model"],
+                         os.path.abspath(args.root), recent, tips)
     # persistent input history across sessions
     histfile = os.path.expanduser("~/.mule/history")
     os.makedirs(os.path.dirname(histfile), exist_ok=True)
@@ -813,7 +856,8 @@ def run_interactive(args, tools, system, messages, task,
             pass
         import atexit
         atexit.register(readline.write_history_file, histfile)
-    repl_loop(input, print, on_task, on_slash)
+    repl_loop(input, print, on_task, on_slash,
+              root=os.path.abspath(args.root))
     if len(box["messages"]) > 1:
         path = save_session(auto_name(), box["messages"])
         print("auto-saved session: %s" % path)
@@ -1027,6 +1071,7 @@ def _run(args):
     chat_fn = make_chat_fn(args, client)
     model_box = chat_fn.model_box
     show = make_show(args)
+    results = make_results(args)
     totals = {"in": 0, "out": 0}
     track = make_track(args, totals, model_box)
     todos = make_todos(args)
@@ -1055,6 +1100,7 @@ def _run(args):
                        system_prompt=system,
                        max_steps=args.max_steps,
                        on_step=show,
+                       on_result=results,
                        messages=run_messages,
                        usage_cb=track,
                        on_todos=todos,
@@ -1136,7 +1182,10 @@ def _run(args):
                             totals["out"],
                             fmt_cost(cost_for(used_model, totals["in"],
                                              totals["out"]))))
-    print(last_answer(messages))
+    if args.quiet:
+        print(last_answer(messages))
+    else:
+        get_renderer().print_markdown(last_answer(messages))
     return exit_code
 
 

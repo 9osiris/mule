@@ -1585,6 +1585,8 @@ Default style:
 
 Narrate as you go: before each batch of tool calls, say in one short line what you are about to do, so the human can follow along.
 
+Small talk stays small: if the user is just chatting (a greeting, thanks, an acknowledgement, or a simple question you can answer from what you already know), reply directly in plain words. Do not call any tools for conversation.
+
 Avoid:
 
 * corporate language
@@ -2859,7 +2861,7 @@ def compact_messages(messages, chat, keep_last=10):
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         messages=None, usage_cb=None, on_todos=None, context_budget=None,
         dry_run=False, max_tools=None, time_limit=None, on_timing=None,
-        parallel_tools=False, tool_timeout=None):
+        parallel_tools=False, tool_timeout=None, on_result=None):
     """the loop. chat(messages) -> assistant message dict, tools is a ToolSet.
     dry_run prints what would happen without executing any tool."""
     if messages is None:
@@ -2973,6 +2975,9 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         tool_count += len(runnable)
         results = ran + ["error: hit max tools (%d), call not executed"
                          % max_tools for _ in calls[len(runnable):]]
+
+        if on_result:
+            on_result(step + 1, calls, results)
 
         for call, result in zip(calls, results):
             messages.append({
