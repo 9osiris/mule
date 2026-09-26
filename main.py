@@ -6,14 +6,22 @@ import sys
 from agent import run, last_answer, load_system_prompt, plan_and_approve, \
     _clean_reply
 from client import ChatClient
-from config import load_config, load_profile
+from config import load_config, load_profile, config_problems
+
+# exit codes: 0 ok, 2 budget hit (or usage error), 3 runtime error,
+# 130 user pressed ctrl-c
+EXIT_OK, EXIT_BUDGET, EXIT_ERROR, EXIT_CANCELLED = 0, 2, 3, 130
+
+__version__ = "0.9.0"
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name, \
     latest_session, search_sessions, rename_session, delete_session, \
     session_stats
 from tools import ToolSet
-from ui import init_color, red, yellow
+from ui import init_color, red, yellow, banner_text, tool_panel, \
+    run_banner, step_line, welcome_screen, \
+    status_footer, Spinner
 
 
 def _num(env_raw, cfg_raw, default, cast):
@@ -31,6 +39,8 @@ def _num(env_raw, cfg_raw, default, cast):
 def build_parser(cfg):
     p = argparse.ArgumentParser(
         description="a minimal coding agent for any openai-compatible api")
+    p.add_argument("--version", action="version",
+                   version="mule %s" % __version__)
     p.add_argument("task", nargs="?", help="what to do, or read from stdin")
     p.add_argument("--model",
                    default=os.environ.get("MULE_MODEL",
@@ -71,6 +81,7 @@ def build_parser(cfg):
     p.add_argument("--search-sessions", default=None, metavar="QUERY",
                    help="search saved sessions for text and exit")
     p.add_argument("--ask", action="store_true",
+                   default=cfg.get("ask", False),
                    help="ask for confirmation before shell commands and file writes")
     p.add_argument("--undo", action="store_true",
                    help="restore the most recently changed file and exit")
@@ -103,7 +114,8 @@ def build_parser(cfg):
                         "for scripting")
     p.add_argument("--output", metavar="FILE",
                    help="write the final answer to FILE too")
-    p.add_argument("--temperature", type=float, default=None,
+    p.add_argument("--temperature", type=float,
+                   default=_num(None, cfg.get("temperature"), None, float),
                    help="sampling temperature, lower is more focused")
     p.add_argument("--max-tokens", type=int, default=None,
                    help="cap on completion tokens per request")
@@ -114,29 +126,69 @@ def build_parser(cfg):
     p.add_argument("--fork", default=None, metavar="NAME",
                    help="branch off a saved session as a new run")
     p.add_argument("--reflect", action="store_true",
+                   default=cfg.get("reflect", False),
                    help="critique the final answer and improve it "
                         "before returning")
-    p.add_argument("--fallback-model", default=None, metavar="MODEL",
+    p.add_argument("--fallback-model", default=cfg.get("fallback_model"),
+                   metavar="MODEL",
                    help="switch to this model if the primary keeps failing")
     p.add_argument("--stop", default=None, metavar="SEQS",
                    help="comma-separated stop sequences for the model")
     p.add_argument("--schema", default=None, metavar="FILE",
                    help="validate the final answer as json against this "
                         "schema file ({\"required\": [...]})")
-    p.add_argument("--max-tools", type=int, default=None,
+    p.add_argument("--max-tools", type=int,
+                   default=_num(None, cfg.get("max_tools"), None, int),
                    help="stop after this many tool executions")
-    p.add_argument("--time-limit", type=float, default=None,
+    p.add_argument("--time-limit", type=float,
+                   default=_num(None, cfg.get("time_limit"), None, float),
                    metavar="SECONDS",
                    help="stop the run after this many seconds")
     p.add_argument("--parallel-tools", action="store_true",
+                   default=cfg.get("parallel_tools", False),
                    help="run independent tool calls in one turn concurrently")
     p.add_argument("--verbose", action="store_true",
+                   default=cfg.get("verbose", False),
                    help="print per-step timing and extra detail")
+    p.add_argument("--allow-tools", default=cfg.get("allow_tools"),
+                   metavar="NAMES",
+                   help="comma-separated tools the model may use, "
+                        "everything else is disabled")
+    p.add_argument("--deny-tools", default=cfg.get("deny_tools"),
+                   metavar="NAMES",
+                   help="comma-separated tools to disable")
+    p.add_argument("--readonly", action="store_true",
+                   default=cfg.get("readonly", False),
+                   help="disable file writes and shell commands")
+    p.add_argument("--allow-network", dest="allow_network",
+                   action="store_true", default=None,
+                   help="allow network tools (the default), overrides "
+                        "no_network in config")
+    p.add_argument("--no-network", dest="no_network",
+                   action="store_true",
+                   default=cfg.get("no_network", False),
+                   help="disable fetch_url, web_search, and http_post")
+    p.add_argument("--template", default=None, metavar="NAME",
+                   help="run the task through .mule/templates/NAME.md, "
+                        "{{task}} becomes your task text")
+    p.add_argument("--import", dest="import_", default=None, metavar="FILE",
+                   help="start from a markdown or jsonl history file")
+    p.add_argument("--log-file", default=cfg.get("log_file"),
+                   metavar="FILE",
+                   help="append all output to FILE as well as the terminal")
+    p.add_argument("--trace", default=cfg.get("trace"), metavar="FILE",
+                   help="write raw api request/response pairs to FILE as jsonl")
+    p.add_argument("--tool-timeout", type=float,
+                   default=cfg.get("tool_timeout"),
+                   metavar="SECONDS",
+                   help="kill the wait on any single tool call after SECONDS")
     return p
 
 
 def parse_args(argv=None):
     cfg = load_config()
+    for problem in config_problems():
+        print("config warning: %s" % problem, file=sys.stderr)
     # --profile has to win before the real parse, so flags can beat it
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--profile", default=None)
@@ -153,7 +205,7 @@ def parse_args(argv=None):
 
 
 SUBCOMMANDS = ("init", "config", "doctor", "completion", "models",
-               "sessions")
+               "sessions", "help", "examples", "demo")
 
 
 def run_subcommand(name, rest):
@@ -166,7 +218,7 @@ def run_subcommand(name, rest):
             created = init_project(target, force=force)
         except FileExistsError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         for path in created:
             print("created %s" % path)
         return 0
@@ -201,8 +253,132 @@ def run_subcommand(name, rest):
         return 0
     if name == "sessions":
         return cmd_sessions(rest)
+    if name == "help":
+        return cmd_help(rest)
+    if name == "examples":
+        return cmd_examples()
+    if name == "demo":
+        return cmd_demo(rest)
     print("unknown subcommand: %s" % name, file=sys.stderr)
     return 2
+
+
+def _demo_message(body):
+    # the fake model: lists the dir once, then reports back
+    messages = body.get("messages", [])
+    saw_tool_result = any(m.get("role") == "tool" for m in messages)
+    if not saw_tool_result:
+        return {"role": "assistant", "content": None,
+                "tool_calls": [{"id": "demo-1", "type": "function",
+                                "function": {"name": "list_dir",
+                                             "arguments": "{}"}}]}
+    listing = next((m.get("content", "") for m in messages
+                    if m.get("role") == "tool"), "")
+    n = len([line for line in listing.splitlines() if line.strip()])
+    return {"role": "assistant",
+            "content": "demo done. the fake model saw %d entries in "
+                       "the project root. set OPENAI_API_KEY and run "
+                       "mule for real work." % n}
+
+
+def cmd_demo(rest):
+    # try the whole loop with no api key: a fake model on localhost
+    # lists the project dir, then writes its summary
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import threading
+
+    class DemoHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            data = json.dumps({
+                "choices": [{"message": _demo_message(body)}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), DemoHandler)
+    port = server.server_port
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    task = " ".join(rest) or "list the files in this project"
+    print("demo mode: fake model on 127.0.0.1:%d" % port)
+    try:
+        return main(["--base-url", "http://127.0.0.1:%d/v1" % port,
+                     "--api-key", "demo", "--model", "demo-model",
+                     "--max-steps", "6", "--no-stream", task])
+    finally:
+        server.shutdown()
+
+
+EXAMPLES = """examples:
+  mule "fix the failing test in test_auth.py"
+  mule "add docstrings to agent.py" --ask
+  mule "summarize this repo" --readonly --print
+  mule --interactive
+  mule "refactor main.py" --plan
+  mule "write a haiku about git" --model gpt-4o-mini --print
+  mule "find dead code" --allow-tools read_file,grep,find
+  mule "check the diff" --no-network
+  mule --template review "main.py"
+  mule sessions stats
+  mule config set model gpt-4o"""
+
+
+def cmd_examples():
+    print(EXAMPLES)
+    return 0
+
+
+HELP_TOPICS = {
+    "tools": """tools the agent can call:
+  read_file, write_file, edit_file, apply_patch   files
+  list_dir, tree, find, grep, read_many, file_info  browsing
+  run_shell, jobs, job_output, job_kill            shell
+  git_status, git_diff, git_log                   git
+  fetch_url, web_search, http_post                network
+  todo_write, todo_read                           planning
+  ask_user, delegate, read_image                   misc
+gate them with --allow-tools, --deny-tools,
+--readonly, or --no-network.""",
+    "config": """config lives in ./mule.json, falling back to
+~/.config/mule/mule.json. local beats home, env beats
+config, flags beat everything.
+  mule config list            show every key
+  mule config get KEY         read one key
+  mule config set KEY VALUE   write one key
+  mule config unset KEY       remove one key
+keys: model, api_key, base_url, max_steps, ask,
+reflect, readonly, no_network, allow_tools...""",
+    "sessions": """every run auto-saves to ~/.mule/sessions/.
+  mule --list-sessions            list them
+  mule --continue                 resume the newest
+  mule --fork NAME                branch off one
+  mule --search-sessions QUERY    search them
+  mule sessions rename OLD NEW    rename one
+  mule sessions rm NAME           delete one
+  mule sessions stats             message counts""",
+    "examples": EXAMPLES,
+}
+
+
+def cmd_help(rest):
+    # mule help [tools|config|sessions|examples]
+    if not rest:
+        print("usage: mule help tools|config|sessions|examples")
+        return 2
+    topic = rest[0].lower()
+    if topic not in HELP_TOPICS:
+        print("unknown help topic: %s" % rest[0], file=sys.stderr)
+        return 2
+    print(HELP_TOPICS[topic])
+    return 0
 
 
 def cmd_sessions(rest):
@@ -236,7 +412,7 @@ def cmd_sessions(rest):
                       % (r["name"], r["messages"], r["bytes"]))
     except ValueError as e:
         print(red("error: %s" % e), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     return 0
 
 
@@ -274,7 +450,7 @@ def cmd_config(rest):
             print("unset %s" % args[1])
     except KeyError as e:
         print(red("error: %s" % e), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     return 0
 
 
@@ -283,6 +459,13 @@ def ask_cmd(command):
     print(yellow("run this? %s" % command))
     ans = input("[y/N] ").strip().lower()
     return ans in ("y", "yes")
+
+
+def ask_critical(command):
+    # the point of no return: only the literal word "yes" runs it
+    print(red("dangerous command: %s" % command))
+    print(red("type 'yes' to run it, anything else aborts"))
+    return input("> ").strip() == "yes"
 
 
 def ask_user_cli(question, options):
@@ -304,6 +487,41 @@ def ask_plan(plan):
     if ans in ("r", "revise"):
         return "r"
     return "y" if ans in ("y", "yes") else "n"
+
+
+def apply_tool_gates(args, tools):
+    # --deny-tools, --allow-tools, --readonly, --no-network:
+    # shrink what the model may call
+    if args.allow_network:
+        args.no_network = False
+    if args.no_network:
+        for name in ("fetch_url", "web_search", "http_post"):
+            tools.disable_tool(name)
+    if args.readonly:
+        for name in ("write_file", "edit_file", "apply_patch", "run_shell"):
+            tools.disable_tool(name)
+    if args.deny_tools:
+        for name in args.deny_tools.split(","):
+            name = name.strip()
+            if name:
+                tools.disable_tool(name)
+    if args.allow_tools:
+        allowed = {n.strip() for n in args.allow_tools.split(",") if n.strip()}
+        for name in list(tools.tools):
+            if name not in allowed:
+                tools.disable_tool(name)
+
+
+def load_template(root, name):
+    # .mule/templates/NAME.md under the project root
+    filename = name if name.endswith(".md") else name + ".md"
+    path = os.path.join(os.path.abspath(root), ".mule", "templates",
+                        filename)
+    if not os.path.isfile(path):
+        raise ValueError("no such template: %s (looked in %s)"
+                         % (name, os.path.dirname(path)))
+    with open(path) as f:
+        return f.read()
 
 
 def make_chat_fn(args, client):
@@ -330,7 +548,30 @@ def make_chat_fn(args, client):
         # stream tokens live unless --no-stream was passed.
         # --print stays silent, it only wants the final answer.
         if args.no_stream or getattr(args, "print_mode", False):
-            return _once(client.chat, messages, tools, stop=stop)
+            if getattr(args, "print_mode", False) or args.quiet or args.json:
+                return _once(client.chat, messages, tools, stop=stop)
+            # waiting on the model: tick the spinner meanwhile.
+            # silent unless stdout is a real terminal.
+            import threading
+            box = {}
+
+            def _call():
+                try:
+                    box["reply"] = _once(client.chat, messages, tools,
+                                         stop=stop)
+                except Exception as e:
+                    box["error"] = e
+
+            t = threading.Thread(target=_call, daemon=True)
+            t.start()
+            spin = Spinner("thinking")
+            while t.is_alive():
+                spin.tick()
+                t.join(0.1)
+            spin.done()
+            if "error" in box:
+                raise box["error"]
+            return box["reply"]
         printed = []
 
         def on_token(t):
@@ -384,8 +625,9 @@ def make_show(args):
             return
         for c in calls:
             a = json.loads(c["function"].get("arguments") or "{}")
-            summary = " ".join("%s=%s" % (k, str(v)[:60]) for k, v in a.items())
-            print("$ %s %s" % (c["function"]["name"], summary))
+            summary = "\n".join("%s=%s" % (k, str(v)[:60])
+                                for k, v in a.items())
+            print(tool_panel(c["function"]["name"], summary))
     return show
 
 
@@ -406,9 +648,8 @@ def make_track(args, totals, model_box=None):
             totals["in"] += pin
             totals["out"] += pout
             if not args.quiet and not args.json and not args.print_mode:
-                print("  [step %d: %s in / %s out, %s]" % (
-                    step, "{:,}".format(pin), "{:,}".format(pout),
-                    fmt_cost(cost_for(model, pin, pout))))
+                print(step_line(step, pin, pout,
+                                fmt_cost(cost_for(model, pin, pout))))
         if args.max_cost is not None:
             spent = cost_for(model, totals["in"], totals["out"])
             if spent is not None and spent > args.max_cost:
@@ -508,7 +749,7 @@ def run_interactive(args, tools, system, messages, task,
     ctx = {"write": print, "tools": tools, "totals": totals,
            "model": args.model, "save_fn": save_fn,
            "commands": commands, "set_model": set_model,
-           "last_task": None}
+           "last_task": None, "version": __version__}
 
     def on_slash(line):
         action = handle_slash(line, ctx)
@@ -547,6 +788,17 @@ def run_interactive(args, tools, system, messages, task,
     if task:
         # a task on the command line runs first, then the loop takes over
         on_task(task)
+    if not args.quiet:
+        from sessions import list_sessions
+        try:
+            recent = list_sessions()[-5:][::-1]
+        except OSError:
+            recent = []
+        tips = ["/help for commands, /quit to leave",
+                "/model NAME to switch models mid-session",
+                "wrap input in ``` blocks for multiline tasks"]
+        print(welcome_screen(__version__, ctx["model"],
+                             os.path.abspath(args.root), recent, tips))
     # persistent input history across sessions
     histfile = os.path.expanduser("~/.mule/history")
     os.makedirs(os.path.dirname(histfile), exist_ok=True)
@@ -606,13 +858,52 @@ def resolve_task(args, stdin):
     return task
 
 
+class _Tee:
+    # mirrors everything printed on stdout into a log file,
+    # so --log-file captures the whole run transcript
+    def __init__(self, path):
+        self.file = open(path, "a")
+        self.stdout = sys.stdout
+
+    def write(self, s):
+        self.stdout.write(s)
+        self.file.write(s)
+
+    def flush(self):
+        self.stdout.flush()
+        self.file.flush()
+
+    def close(self):
+        try:
+            self.file.close()
+        except OSError:
+            pass
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in SUBCOMMANDS:
         return run_subcommand(argv[0], argv[1:])
     args = parse_args(argv)
     init_color(args.no_color)
+    if not args.log_file:
+        return _run(args)
+    try:
+        tee = _Tee(args.log_file)
+    except OSError as e:
+        print(red("error: cannot open log file: %s" % e),
+              file=sys.stderr)
+        return EXIT_ERROR
+    old_stdout = sys.stdout
+    sys.stdout = tee
+    try:
+        return _run(args)
+    finally:
+        sys.stdout = old_stdout
+        tee.close()
 
+
+def _run(args):
     if args.list_sessions:
         for name in list_sessions():
             print(name)
@@ -629,6 +920,8 @@ def main(argv=None):
     tools = ToolSet(args.root,
                     confirm=ask_cmd if (args.ask and not args.print_mode)
                     else None,
+                    confirm_critical=ask_critical
+                    if (args.ask and not args.print_mode) else None,
                     ask=ask_user_cli
                     if ((args.interactive or args.ask)
                         and not args.print_mode) else None)
@@ -642,6 +935,7 @@ def main(argv=None):
         tools.tools[t["name"]] = t
     for e in plugin_errors:
         say(args, "warning: %s" % e)
+    apply_tool_gates(args, tools)
     if args.undo:
         print(tools.undo_last())
         return 0
@@ -651,7 +945,7 @@ def main(argv=None):
             path = restore_checkpoint(args.root, args.restore)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         print("restored checkpoint: %s" % path)
         return 0
     if args.checkpoint:
@@ -661,7 +955,16 @@ def main(argv=None):
             say(args, "checkpoint saved: %s" % path)
 
     task = resolve_task(args, sys.stdin)
-    if not task and not args.resume and not args.cont and not args.interactive:
+    if args.template:
+        # the template wraps the task: {{task}} becomes the task text
+        try:
+            task = load_template(args.root, args.template).replace(
+                "{{task}}", task or "")
+        except ValueError as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return EXIT_ERROR
+    if not task and not args.resume and not args.cont and not args.interactive \
+            and not args.import_:
         print(red("give it a task, as an argument or on stdin"),
               file=sys.stderr)
         return 2
@@ -669,10 +972,14 @@ def main(argv=None):
         print(red("set OPENAI_API_KEY or pass --api-key"), file=sys.stderr)
         return 2
 
+    if not args.quiet and not args.json and not args.print_mode:
+        print(banner_text(__version__, args.model))
+
     client = ChatClient(args.base_url, args.api_key, args.model,
                         timeout=args.timeout, retries=args.retries,
                         temperature=args.temperature,
-                        max_tokens=args.max_tokens, seed=args.seed)
+                        max_tokens=args.max_tokens, seed=args.seed,
+                        trace_file=args.trace)
     tools.make_chat = lambda: make_chat_fn(args, client)
     system = resolve_system(args)
 
@@ -682,7 +989,7 @@ def main(argv=None):
             messages = load_session(args.resume)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
     if args.fork and messages is None:
         # branch off a saved session: same start, but saving later
         # needs an explicit name, so the original stays untouched
@@ -690,20 +997,31 @@ def main(argv=None):
             messages = load_session(args.fork)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         if not args.quiet and not args.print_mode:
             say(args, "forked from session: %s" % args.fork)
+    if args.import_ and messages is None:
+        # start from a markdown or jsonl history file
+        from sessions import import_history
+        try:
+            messages = import_history(args.import_)
+        except (ValueError, OSError) as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return EXIT_ERROR
+        if not args.quiet and not args.print_mode:
+            say(args, "imported %d messages from %s"
+                      % (len(messages), args.import_))
     if args.cont and messages is None:
         latest = latest_session()
         if latest is None:
             print(red("error: no saved sessions to continue"),
                   file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         try:
             messages = load_session(latest)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
-            return 1
+            return EXIT_ERROR
         if not args.quiet and not args.print_mode:
             say(args, "continuing session: %s" % latest)
     if args.interactive and messages is None:
@@ -733,6 +1051,9 @@ def main(argv=None):
     try:
         if args.dry_run and not args.quiet and not args.json:
             print("dry run: tools will not be executed")
+        if not args.quiet and not args.json and not args.print_mode:
+            print(run_banner(__version__, model_box["model"],
+                             os.path.abspath(args.root)))
         messages = run(run_task, chat_fn, tools,
                        system_prompt=system,
                        max_steps=args.max_steps,
@@ -745,10 +1066,14 @@ def main(argv=None):
                        max_tools=args.max_tools,
                        time_limit=args.time_limit,
                        on_timing=timing,
-                       parallel_tools=args.parallel_tools)
+                       parallel_tools=args.parallel_tools,
+                       tool_timeout=args.tool_timeout)
     except RuntimeError as e:
         print(red("error: %s" % e), file=sys.stderr)
-        return 1
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        print(red("\ncancelled"), file=sys.stderr)
+        return EXIT_CANCELLED
 
     step_no = sum(1 for m in messages
                   if m.get("role") == "assistant") + 1
@@ -756,6 +1081,9 @@ def main(argv=None):
     if args.reflect and final and not final.startswith("stopped:"):
         messages = reflect_answer(args, chat_fn, messages, track, step_no)
         step_no += 1
+        final = last_answer(messages)
+    exit_code = EXIT_BUDGET if final == "stopped: hit cost budget" \
+        else EXIT_OK
     if args.schema and final and not final.startswith("stopped:"):
         messages = enforce_schema(args, chat_fn, messages, track, step_no)
 
@@ -785,7 +1113,7 @@ def main(argv=None):
     if args.json:
         print(json.dumps(build_result(args, messages, totals, model_box),
                          indent=2))
-        return 0
+        return exit_code
 
     if args.output:
         # write the final answer to a file too, works with --print
@@ -804,14 +1132,20 @@ def main(argv=None):
     if args.print_mode:
         # scripting mode: just the answer, nothing else
         print(last_answer(messages))
-        return 0
+        return exit_code
 
     if not args.quiet:
-        print("---")
-        print(cost_line)
+        print(status_footer(__version__, used_model, totals["in"],
+                            totals["out"],
+                            fmt_cost(cost_for(used_model, totals["in"],
+                                             totals["out"]))))
     print(last_answer(messages))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print(red("\ncancelled"), file=sys.stderr)
+        sys.exit(EXIT_CANCELLED)

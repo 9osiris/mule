@@ -3318,7 +3318,9 @@ _old_no_color = os.environ.pop("NO_COLOR", None)
 ui_mod.init_color(True)
 check("brand is plain with --no-color", brand("x") == "x")
 check("panels are plain with --no-color",
-      tool_panel("n", "s") == "┌─ n\n│ s\n└─")
+      tool_panel("n", "s") == "╭─ n ──────────────╮\n"
+      "│ s                │\n"
+      "╰──────────────────╯")
 check("footer is plain with --no-color",
       status_footer("0.9.0", "m", 1234, 567, "$0.01")
       == "─" * 40 + "\nmule 0.9.0 | model m | 1,234 in / 567 out | $0.01")
@@ -3328,6 +3330,31 @@ if _old_no_color is not None:
     os.environ["NO_COLOR"] = _old_no_color
 ui_mod.init_color(bool(_old_no_color))
 check("brand wraps in amber with color on", _on_wrapped)
+
+from ui import run_banner, step_line, welcome_screen
+
+ui_mod.init_color(True)
+check("run banner carries version, model, root",
+      "mule 0.9.0" in run_banner("0.9.0", "m", "/r")
+      and "m" in run_banner("0.9.0", "m", "/r")
+      and "/r" in run_banner("0.9.0", "m", "/r"))
+check("step line shows tokens and cost",
+      step_line(3, 6808, 71, "$0.01")
+      == "  step 3 · 6,808 in / 71 out · $0.01")
+_w = welcome_screen("0.9.0", "m", "/r",
+                    ["s1 - 4 messages"], ["/help for commands"])
+check("welcome screen shows model, session, tip",
+      "mule v0.9.0" in _w and "s1 - 4 messages" in _w
+      and "/help for commands" in _w)
+check("welcome screen columns stay aligned",
+      len(set(len(l) for l in _w.splitlines()
+              if l.strip("┄").strip())) == 1)
+_prompts = []
+def _eof_read(p):
+    _prompts.append(p)
+    raise EOFError()
+repl_loop(_eof_read, lambda s: None, lambda l: None, lambda l: None)
+check("repl prompt is a bare > ", _prompts == ["> "])
 
 _spin = Spinner("thinking")
 _spin.tick()
@@ -3345,7 +3372,7 @@ with contextlib.redirect_stdout(_buf):
 check("tool calls render as panels",
       "run_shell" in _buf.getvalue()
       and "command=echo hi" in _buf.getvalue()
-      and "┌─" in _buf.getvalue())
+      and "╭─" in _buf.getvalue())
 
 _main_mod.ChatClient = _LogClient
 _buf = io.StringIO()

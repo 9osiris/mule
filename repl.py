@@ -17,6 +17,7 @@ HELP_TEXT = """slash commands:
   /retry       run the last task again
   /compress    summarize history into a short recap
   /undo        restore the most recently changed file
+  /bug [TEXT]  print a prefilled github issue url
 tip: wrap input in ``` blocks for multiline tasks"""
 
 
@@ -88,6 +89,15 @@ def handle_slash(line, ctx):
         write("nothing to retry yet")
     elif cmd == "compress":
         return "compress"
+    elif cmd == "bug":
+        from urllib.parse import quote
+        title = arg or "bug report"
+        body = ("mule version: %s\n\nwhat happened:\n\n"
+                "what you expected:\n\nsteps to reproduce:\n"
+                % ctx.get("version", "?"))
+        url = ("https://github.com/9osiris/mule/issues/new"
+               "?title=%s&body=%s" % (quote(title), quote(body)))
+        write("file it here:\n%s" % url)
     elif cmd == "tools":
         if arg:
             # /tools off NAME | /tools on NAME
@@ -114,14 +124,14 @@ def handle_slash(line, ctx):
     return None
 
 
-def repl_loop(read_line, write, on_task, on_slash):
+def repl_loop(read_line, write, on_task, on_slash, prompt="> "):
     # read_line(prompt) raises EOFError/KeyboardInterrupt to leave.
     # a line starting with ``` opens a multiline block: everything
     # until the closing ``` becomes one task.
     write("interactive mode. /help for commands, /quit to leave.")
     while True:
         try:
-            line = read_line("mule> ")
+            line = read_line(prompt)
         except (EOFError, KeyboardInterrupt):
             write("")
             break
