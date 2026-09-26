@@ -71,6 +71,7 @@ def build_parser(cfg):
     p.add_argument("--search-sessions", default=None, metavar="QUERY",
                    help="search saved sessions for text and exit")
     p.add_argument("--ask", action="store_true",
+                   default=cfg.get("ask", False),
                    help="ask for confirmation before shell commands and file writes")
     p.add_argument("--undo", action="store_true",
                    help="restore the most recently changed file and exit")
@@ -103,7 +104,8 @@ def build_parser(cfg):
                         "for scripting")
     p.add_argument("--output", metavar="FILE",
                    help="write the final answer to FILE too")
-    p.add_argument("--temperature", type=float, default=None,
+    p.add_argument("--temperature", type=float,
+                   default=_num(None, cfg.get("temperature"), None, float),
                    help="sampling temperature, lower is more focused")
     p.add_argument("--max-tokens", type=int, default=None,
                    help="cap on completion tokens per request")
@@ -114,30 +116,39 @@ def build_parser(cfg):
     p.add_argument("--fork", default=None, metavar="NAME",
                    help="branch off a saved session as a new run")
     p.add_argument("--reflect", action="store_true",
+                   default=cfg.get("reflect", False),
                    help="critique the final answer and improve it "
                         "before returning")
-    p.add_argument("--fallback-model", default=None, metavar="MODEL",
+    p.add_argument("--fallback-model", default=cfg.get("fallback_model"),
+                   metavar="MODEL",
                    help="switch to this model if the primary keeps failing")
     p.add_argument("--stop", default=None, metavar="SEQS",
                    help="comma-separated stop sequences for the model")
     p.add_argument("--schema", default=None, metavar="FILE",
                    help="validate the final answer as json against this "
                         "schema file ({\"required\": [...]})")
-    p.add_argument("--max-tools", type=int, default=None,
+    p.add_argument("--max-tools", type=int,
+                   default=_num(None, cfg.get("max_tools"), None, int),
                    help="stop after this many tool executions")
-    p.add_argument("--time-limit", type=float, default=None,
+    p.add_argument("--time-limit", type=float,
+                   default=_num(None, cfg.get("time_limit"), None, float),
                    metavar="SECONDS",
                    help="stop the run after this many seconds")
     p.add_argument("--parallel-tools", action="store_true",
+                   default=cfg.get("parallel_tools", False),
                    help="run independent tool calls in one turn concurrently")
     p.add_argument("--verbose", action="store_true",
+                   default=cfg.get("verbose", False),
                    help="print per-step timing and extra detail")
-    p.add_argument("--allow-tools", default=None, metavar="NAMES",
+    p.add_argument("--allow-tools", default=cfg.get("allow_tools"),
+                   metavar="NAMES",
                    help="comma-separated tools the model may use, "
                         "everything else is disabled")
-    p.add_argument("--deny-tools", default=None, metavar="NAMES",
+    p.add_argument("--deny-tools", default=cfg.get("deny_tools"),
+                   metavar="NAMES",
                    help="comma-separated tools to disable")
     p.add_argument("--readonly", action="store_true",
+                   default=cfg.get("readonly", False),
                    help="disable file writes and shell commands")
     p.add_argument("--allow-network", dest="allow_network",
                    action="store_true", default=None,
@@ -145,6 +156,7 @@ def build_parser(cfg):
                         "no_network in config")
     p.add_argument("--no-network", dest="no_network",
                    action="store_true",
+                   default=cfg.get("no_network", False),
                    help="disable fetch_url, web_search, and http_post")
     return p
 
