@@ -1175,7 +1175,24 @@ check("no compaction under budget",
 short = [{"role": "system", "content": "s"},
          {"role": "user", "content": "hi"}]
 check("short history untouched",
-      compact_messages(short, cchat) == short)
+      compact_messages(short, cchat)[0] == short)
+
+# the summary call counts toward cost tracking
+
+def uchat(messages, tools):
+    uchat.n += 1
+    if not tools:
+        return {"role": "assistant", "content": "summary",
+                "usage": {"prompt_tokens": 50, "completion_tokens": 10}}
+    return {"role": "assistant", "content": "done"}
+uchat.n = 0
+
+ugot = []
+run(None, uchat, ToolSet(tempfile.mkdtemp()), messages=list(fat),
+    max_steps=2, context_budget=1000,
+    usage_cb=lambda s, u: ugot.append(u))
+check("summary usage hits usage_cb",
+      {"prompt_tokens": 50, "completion_tokens": 10} in ugot)
 
 check("--context-budget parses",
       parse_args(["t", "--context-budget", "5000"]).context_budget == 5000)

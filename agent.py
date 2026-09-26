@@ -74,10 +74,12 @@ def context_size(messages):
 
 def compact_messages(messages, chat, keep_last=10):
     # squash the oldest messages into one summary, keep the
-    # system prompt and the recent tail intact
+    # system prompt and the recent tail intact.
+    # returns (new_messages, summary_usage) so the summary call
+    # still counts toward cost tracking.
     head = 1 if (messages and messages[0].get("role") == "system") else 0
     if len(messages) <= head + keep_last + 1:
-        return messages
+        return messages, None
     middle = messages[head:-keep_last]
     tail = messages[-keep_last:]
     reply = chat([
@@ -91,7 +93,7 @@ def compact_messages(messages, chat, keep_last=10):
     out.append({"role": "user",
                 "content": "[earlier context summarized]\n" + summary})
     out.extend(tail)
-    return out
+    return out, reply.get("usage")
 
 
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
@@ -113,8 +115,11 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
     for step in range(max_steps):
         if (context_budget and context_size(messages) > context_budget
                 and len(messages) > 12):
-            # history got too big, squash the old stuff down
-            messages = compact_messages(messages, chat)
+            # history got too big, squash the old stuff down.
+            # the summary call still counts toward cost tracking
+            messages, summary_usage = compact_messages(messages, chat)
+            if usage_cb and summary_usage:
+                usage_cb(step + 1, summary_usage)
 
         reply = chat(messages, tools.schemas())
         stop = usage_cb(step + 1, reply.get("usage")) if usage_cb else False
