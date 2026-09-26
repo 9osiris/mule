@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 17)
+      and len(seen["bodies"][0]["tools"]) == 18)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -2330,6 +2330,18 @@ check("find locates files recursively",
 check("find reports no matches",
       _find_tools.call("find", {"pattern": "*.go"})
       == "no files matching '*.go'")
+
+_tree_tools = ToolSet(_find_root)
+_tree_out = _tree_tools.call("tree", {"path": "."})
+_tree_base = os.path.basename(_find_root)
+check("tree shows the root", _tree_out.split("\n")[0] == _tree_base)
+check("tree marks dirs with a slash",
+      "sub/" in _tree_out and "a.py" in _tree_out)
+os.makedirs(os.path.join(_find_root, "sub", "deep"))
+open(os.path.join(_find_root, "sub", "deep", "x.txt"), "w").write("x")
+check("tree depth 1 hides nested content",
+      "deep/" not in _tree_tools.call("tree", {"path": ".", "depth": "1"})
+      and "deep/" in _tree_tools.call("tree", {"path": ".", "depth": "3"}))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

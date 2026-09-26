@@ -267,6 +267,12 @@ class ToolSet:
                                "path": "where to search, default '.'"},
                 "run": self.find,
             },
+            "tree": {
+                "description": "show the directory structure as a tree",
+                "parameters": {"path": "where to start, default '.'",
+                               "depth": "how deep to go, default 3"},
+                "run": self.tree,
+            },
         }
 
     def schemas(self):
@@ -653,3 +659,37 @@ class ToolSet:
                 if len(found) >= 100:
                     return "\n".join(found) + "\n...[truncated]"
         return "\n".join(found) or "no files matching %r" % pattern
+
+    def tree(self, path=".", depth="3"):
+        # classic tree view, dirs get a trailing slash
+        try:
+            max_depth = max(1, min(int(depth), 10))
+        except (TypeError, ValueError):
+            max_depth = 3
+        base = self._resolve(path)
+        if not os.path.isdir(base):
+            return "error: not a directory: %s" % path
+        lines = [os.path.basename(base) or base]
+
+        def walk(dirpath, prefix, level):
+            if level > max_depth:
+                return
+            try:
+                entries = sorted(os.listdir(dirpath))
+            except OSError:
+                return
+            # dirs first, like the real tree command
+            entries.sort(key=lambda e: not os.path.isdir(
+                os.path.join(dirpath, e)))
+            for i, name in enumerate(entries):
+                last = i == len(entries) - 1
+                branch = "└── " if last else "├── "
+                full = os.path.join(dirpath, name)
+                label = name + "/" if os.path.isdir(full) else name
+                lines.append(prefix + branch + label)
+                if os.path.isdir(full):
+                    walk(full, prefix + ("    " if last else "│   "),
+                         level + 1)
+
+        walk(base, "", 1)
+        return "\n".join(lines)
