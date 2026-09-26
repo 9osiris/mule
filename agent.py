@@ -4,7 +4,7 @@ import os
 
 SYSTEM_PROMPT = """You are a coding agent working inside a project directory.
 You have tools to read files, write files, edit files, list directories,
-and run shell commands.
+run shell commands, and fetch web pages.
 All paths are relative to the project root. Use them for everything.
 
 Rules:

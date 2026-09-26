@@ -59,9 +59,10 @@ as prices move); models not in the table show "unknown pricing".
 ## how it works
 
 `agent.py` runs the loop: send messages, take the model's tool calls,
-run them, feed results back, repeat. `tools.py` has five tools -
-read_file, write_file, edit_file, list_dir, run_shell - all sandboxed
-to `--root` so the agent can't wander out of the project dir.
+run them, feed results back, repeat. `tools.py` has six tools -
+read_file, write_file, edit_file, list_dir, run_shell, fetch_url -
+all sandboxed to `--root` so the agent can't wander out of the project
+dir (fetch_url only does http/https).
 `client.py` is the http client for /v1/chat/completions, with
 streaming support and token usage capture. `cost.py` holds rough
 per-model pricing. `sessions.py` saves and resumes conversations
@@ -75,6 +76,7 @@ prompt.
 - `edit_file` - replace one exact string in a file, must match once
 - `list_dir` - list a directory
 - `run_shell` - run a shell command in the project root
+- `fetch_url` - fetch a web page, html stripped to rough text
 
 ## safety notes
 

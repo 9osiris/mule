@@ -1,8 +1,13 @@
+import html
 import os
+import re
 import subprocess
+import urllib.parse
+import urllib.request
 
 MAX_READ = 100_000  # don't dump giant files into context
 MAX_OUTPUT = 20_000
+MAX_FETCH = 200_000  # cap on downloaded pages
 
 
 class ToolSet:
@@ -34,6 +39,11 @@ class ToolSet:
                 "description": "run a shell command in the project root, returns output",
                 "parameters": {"command": "the command", "timeout": "seconds, default 30"},
                 "run": self.run_shell,
+            },
+            "fetch_url": {
+                "description": "fetch a web page, returns the text with html stripped",
+                "parameters": {"url": "http or https url"},
+                "run": self.fetch_url,
             },
         }
 
@@ -137,3 +147,26 @@ class ToolSet:
             out = out[:MAX_OUTPUT] + "\n...[truncated]"
         out = out.rstrip() or "(no output)"
         return "exit %d\n%s" % (proc.returncode, out)
+
+    def fetch_url(self, url):
+        # grab a page, strip the html down to rough text
+        scheme = urllib.parse.urlparse(url or "").scheme
+        if scheme not in ("http", "https"):
+            return "error: only http and https urls, got: %s" % scheme
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "mule/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = resp.read(MAX_FETCH + 1)
+        except Exception as e:
+            return "error: fetch failed: %s" % e
+        if len(data) > MAX_FETCH:
+            data = data[:MAX_FETCH]
+        text = data.decode("utf-8", errors="replace")
+        text = re.sub(r"<script.*?</script>", " ", text,
+                      flags=re.S | re.I)
+        text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html.unescape(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text or "(empty page)"

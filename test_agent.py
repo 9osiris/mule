@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 5)
+      and len(seen["bodies"][0]["tools"]) == 6)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -412,6 +412,54 @@ check("stream asked for usage",
 check("streamed usage captured",
       usreply.get("usage") == {"prompt_tokens": 40, "completion_tokens": 8})
 check("streamed content still intact", usreply.get("content") == "hi")
+
+# fetch_url: local page, html stripped, caps and rejections
+
+PAGE = (b"<html><head><title>hi</title><style>.x{color:red}</style></head>"
+        b"<body><script>alert(1)</script><h1>Hello &amp; bye</h1>"
+        b"<p>some   text</p></body></html>")
+BIG = b"<p>" + b"x" * 300_000 + b"</p>"
+
+
+class PageHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = BIG if self.path == "/big" else PAGE
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+pserver = HTTPServer(("127.0.0.1", 0), PageHandler)
+threading.Thread(target=pserver.serve_forever, daemon=True).start()
+pbase = "http://127.0.0.1:%d" % pserver.server_port
+ptools = ToolSet(tempfile.mkdtemp())
+
+text = ptools.call("fetch_url", {"url": pbase + "/"})
+check("fetch_url strips html to text",
+      text == "hi Hello & bye some text")
+check("fetch_url drops script and style", "alert" not in text
+      and "color" not in text)
+check("fetch_url registered in schemas",
+      any(t["function"]["name"] == "fetch_url"
+          for t in ptools.schemas()))
+
+big = ptools.call("fetch_url", {"url": pbase + "/big"})
+check("fetch_url caps huge pages", len(big) <= 200_050
+      and "x" * 100 in big)
+check("fetch_url rejects file urls",
+      ptools.call("fetch_url", {"url": "file:///etc/passwd"})
+      .startswith("error:"))
+check("fetch_url rejects bare strings",
+      ptools.call("fetch_url", {"url": "notaurl"}).startswith("error:"))
+check("fetch_url handles dead servers",
+      ptools.call("fetch_url", {"url": "http://127.0.0.1:1/"})
+      .startswith("error:"))
+pserver.shutdown()
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
