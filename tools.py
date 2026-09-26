@@ -1,6 +1,8 @@
+import base64
 import datetime
 import difflib
 import html
+import json
 import os
 import re
 import shutil
@@ -11,7 +13,16 @@ import urllib.request
 MAX_READ = 100_000  # don't dump giant files into context
 MAX_OUTPUT = 20_000
 MAX_FETCH = 200_000  # cap on downloaded pages
+MAX_IMAGE = 1_000_000  # biggest image read_image will swallow
 DDG_LITE = "https://lite.duckduckgo.com/lite/"
+IMAGE_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+TODO_STATES = ("pending", "in_progress", "done")
 
 
 def _ddg_results(page, limit=8):
@@ -77,6 +88,7 @@ class ToolSet:
         # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
         self.backups = BackupStore()
+        self.todos = []  # [{text, status}] the model manages itself
         self.tools = {
             "read_file": {
                 "description": "read a text file, path relative to project root",
@@ -114,6 +126,23 @@ class ToolSet:
                 "parameters": {"query": "what to search for",
                                "count": "how many results, default 5"},
                 "run": self.web_search,
+            },
+            "todo_write": {
+                "description": "replace the todo list. statuses: "
+                               "pending, in_progress, done",
+                "parameters": {"todos": "json list of {text, status} objects"},
+                "run": self.todo_write,
+            },
+            "todo_read": {
+                "description": "show the current todo list",
+                "parameters": {},
+                "run": self.todo_read,
+            },
+            "read_image": {
+                "description": "load an image as a base64 data uri the model "
+                               "can look at (png/jpg/gif/webp)",
+                "parameters": {"path": "relative path of the image"},
+                "run": self.read_image,
             },
         }
 
@@ -251,6 +280,69 @@ class ToolSet:
             out = out[:MAX_OUTPUT] + "\n...[truncated]"
         out = out.rstrip() or "(no output)"
         return "exit %d\n%s" % (proc.returncode, out)
+
+    def todo_write(self, todos="[]"):
+        # the model rewrites its whole todo list each time it changes
+        try:
+            items = json.loads(todos or "[]")
+        except json.JSONDecodeError:
+            return "error: todos was not valid json"
+        if not isinstance(items, list):
+            return "error: todos must be a json list"
+        cleaned = []
+        for it in items:
+            if not isinstance(it, dict) or not it.get("text"):
+                return "error: every todo needs a text field"
+            status = it.get("status") or "pending"
+            if status not in TODO_STATES:
+                return "error: bad status %r, use %s" % (
+                    status, "/".join(TODO_STATES))
+            cleaned.append({"text": str(it["text"]),
+                            "status": status})
+        self.todos = cleaned
+        return self.progress_line() or "todo list cleared"
+
+    def todo_read(self):
+        # the current list, readable at a glance
+        if not self.todos:
+            return "(no todos)"
+        marks = {"pending": "[ ]", "in_progress": "[>]",
+                 "done": "[x]"}
+        return "\n".join("%s %s" % (marks[t["status"]], t["text"])
+                         for t in self.todos)
+
+    def progress_line(self):
+        # compact "[2/5] current thing" line for the loop to print
+        if not self.todos:
+            return None
+        done = sum(1 for t in self.todos if t["status"] == "done")
+        cur = next((t for t in self.todos
+                    if t["status"] == "in_progress"), None)
+        if cur is None:
+            cur = next((t for t in self.todos
+                        if t["status"] == "pending"), None)
+        what = cur["text"] if cur else "all done"
+        return "[%d/%d] %s" % (done, len(self.todos), what)
+
+    def read_image(self, path):
+        # load an image as a data uri, shaped for vision-capable models
+        full = self._resolve(path)
+        ext = os.path.splitext(full)[1].lower()
+        mime = IMAGE_TYPES.get(ext)
+        if not mime:
+            return "error: not a supported image (png/jpg/gif/webp): %s" % path
+        if not os.path.isfile(full):
+            return "error: no such file: %s" % path
+        size = os.path.getsize(full)
+        if size > MAX_IMAGE:
+            return "error: image too big (%d bytes, max %d)" % (
+                size, MAX_IMAGE)
+        with open(full, "rb") as f:
+            data = f.read()
+        uri = "data:%s;base64,%s" % (
+            mime, base64.b64encode(data).decode("ascii"))
+        return ("image %s, %d bytes, %s. show it to the user like this:\n"
+                "![%s](%s)" % (path, size, mime, path, uri))
 
     def fetch_url(self, url):
         # grab a page, strip the html down to rough text

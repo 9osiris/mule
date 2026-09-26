@@ -139,7 +139,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 9)
+      and len(seen["bodies"][0]["tools"]) == 10)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
@@ -1181,6 +1181,38 @@ check("--context-budget parses",
       parse_args(["t", "--context-budget", "5000"]).context_budget == 5000)
 check("--context-budget defaults to 100k",
       parse_args(["t"]).context_budget == 100000)
+
+# read_image: tiny png fixture, sandbox, type checks
+
+import base64 as b64mod
+
+iroot = tempfile.mkdtemp()
+itools = ToolSet(iroot)
+# a 1x1 red png, hand-rolled bytes
+png = (b64mod.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+    "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+open(os.path.join(iroot, "dot.png"), "wb").write(png)
+open(os.path.join(iroot, "note.txt"), "w").write("not an image")
+
+ires = itools.call("read_image", {"path": "dot.png"})
+check("read_image returns a data uri",
+      "data:image/png;base64," in ires)
+check("read_image payload roundtrips",
+      b64mod.b64decode(ires.split("data:image/png;base64,")[1]
+                       .split(")")[0]) == png)
+check("read_image names the file and type",
+      "dot.png" in ires and "image/png" in ires)
+check("read_image rejects non-images",
+      itools.call("read_image", {"path": "note.txt"}).startswith("error:"))
+check("read_image rejects missing files",
+      itools.call("read_image", {"path": "nope.png"}).startswith("error:"))
+check("read_image stays in the sandbox",
+      "escapes project root" in itools.call(
+          "read_image", {"path": "../evil.png"}))
+check("read_image is in the schemas",
+      any(s["function"]["name"] == "read_image"
+          for s in itools.schemas()))
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

@@ -7,6 +7,10 @@ html stripped. Use it when you need docs or reference material.
 web_search takes a query and returns titles, urls, and snippets from
 duckduckgo. Use it to look things up, then fetch_url the hits that
 look promising.
+todo_write takes a json list of {text, status} todos for multi-step
+work (statuses: pending, in_progress, done). todo_read shows the list.
+read_image loads a png/jpg/gif/webp as a base64 data uri so you can
+look at images.
 
 Rules:
 - Read before you change. Look at the files involved first.
