@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from agent import run, last_answer
+from agent import run, last_answer, _clean_reply
 from client import ChatClient
 from tools import ToolSet
 
@@ -141,12 +141,148 @@ check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
       and len(seen["bodies"][0]["tools"]) == 25)
+
+# every tool schema carries an explicit required array:
+# strict gateways reject the schema when it is missing
+req_ok = all(
+    isinstance(t["function"]["parameters"].get("required"), list)
+    and set(t["function"]["parameters"]["required"])
+    == set(t["function"]["parameters"]["properties"])
+    for t in seen["bodies"][0]["tools"])
+check("tool schemas carry an explicit required array", req_ok)
 check("second request included the tool result",
       seen["bodies"][1]["messages"][-1]["role"] == "tool")
 check("file written through the whole stack",
       open(os.path.join(root2, "srv.txt")).read() == "via server")
 check("final answer came back",
       last_answer(msgs) == "wrote it through the server")
+
+# strict gateways (agentrouter) 422 when the echoed assistant message
+# carries tool calls without their type tag
+echoed = [m for m in seen["bodies"][1]["messages"]
+          if m.get("role") == "assistant" and m.get("tool_calls")]
+check("echoed tool calls keep the type tag",
+      len(echoed) > 0 and all(
+          tc.get("type") == "function"
+          for m in echoed for tc in m["tool_calls"]))
+
+# agentrouter compat headers: sent only when the base url points at it
+
+seen_heads = []
+
+
+class HeadHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        seen_heads.append(dict(self.headers))
+        data = json.dumps({"choices": [{"message": {
+            "role": "assistant", "content": "hi"}}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+hserver = HTTPServer(("127.0.0.1", 0), HeadHandler)
+threading.Thread(target=hserver.serve_forever, daemon=True).start()
+hbase = "http://127.0.0.1:%d" % hserver.server_port
+
+ar_client = ChatClient(hbase + "/agentrouter.org/v1", "k", "m")
+ar_client.chat([{"role": "user", "content": "hi"}])
+ar_heads = seen_heads[-1]
+check("agentrouter base url sends originator header",
+      ar_heads.get("Originator") == "codex_cli_rs")
+check("agentrouter base url sends version header",
+      ar_heads.get("Version") == "0.101.0")
+check("agentrouter base url spoofs user agent",
+      (ar_heads.get("User-Agent") or "").startswith("codex_cli_rs"))
+
+plain_client = ChatClient(hbase + "/v1", "k", "m")
+plain_client.chat([{"role": "user", "content": "hi"}])
+plain_heads = seen_heads[-1]
+check("other base urls do not send originator header",
+      "Originator" not in plain_heads)
+hserver.shutdown()
+
+# retry nudges never split tool results: every tool call must sit
+# right next to its result, some gateways reject anything wedged
+# between them when translating to other api shapes
+
+RRESPONSES = [
+    {"choices": [{"message": {
+        "role": "assistant", "content": None,
+        "tool_calls": [
+            {"id": "r1", "type": "function",
+             "function": {"name": "nope_missing",
+                          "arguments": "{}"}},
+            {"id": "r2", "type": "function",
+             "function": {"name": "write_file",
+                          "arguments": json.dumps({"path": "ok.txt",
+                                                   "content": "x"})}},
+        ]}}]},
+    {"choices": [{"message": {
+        "role": "assistant", "content": "done"}}]},
+]
+rseen = {"bodies": []}
+
+
+class RetryHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        rseen["bodies"].append(json.loads(self.rfile.read(length)))
+        body = RRESPONSES.pop(0)
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+rserver = HTTPServer(("127.0.0.1", 0), RetryHandler)
+threading.Thread(target=rserver.serve_forever, daemon=True).start()
+rroot = tempfile.mkdtemp()
+rclient = ChatClient("http://127.0.0.1:%d/v1" % rserver.server_port,
+                     "fake-key", "fake-model")
+rtools = ToolSet(rroot)
+rmsgs = run("do the things", rclient.chat, rtools,
+            system_prompt="t", max_steps=5)
+rserver.shutdown()
+
+rm = rseen["bodies"][1]["messages"]
+r_asst = next(i for i, m in enumerate(rm)
+              if m.get("role") == "assistant" and m.get("tool_calls"))
+r_after = rm[r_asst + 1:]
+r_tools = [m for m in r_after if m["role"] == "tool"]
+check("both tool results present", len(r_tools) == 2)
+check("tool results stay adjacent to the assistant message",
+      [m["role"] for m in r_after[:2]] == ["tool", "tool"])
+check("retry nudge comes after all results",
+      r_after[2]["role"] == "user" and "failed" in r_after[2]["content"])
+check("retry still only fires once per call",
+      sum(1 for m in rmsgs if m.get("role") == "user"
+          and "failed" in m.get("content", "")) == 1)
+
+# assistant messages echoed back always carry a content field, even
+# when the model only returned tool calls (some gateways 422 without it)
+
+tc_only = {"role": "assistant",
+           "tool_calls": [{"id": "c1", "function": {
+               "name": "list_dir", "arguments": "{}"}}]}
+cleaned = _clean_reply(tc_only)
+check("tool-only reply keeps a content field",
+      cleaned.get("content") == "")
+check("tool-only reply keeps its tool calls",
+      cleaned.get("tool_calls") == tc_only["tool_calls"])
+check("text reply content passes through",
+      _clean_reply({"role": "assistant",
+                    "content": "hi"})["content"] == "hi")
 
 # edit_file: patch one exact string
 
@@ -250,6 +386,45 @@ check("streamed answer is the joined tokens",
       last_answer(smsgs) == "edited the file")
 check("tool result fed back after streamed call",
       any(m["role"] == "tool" for m in smsgs))
+
+# some servers/proxies send data: null keepalives mid-stream;
+# the parser must skip them instead of crashing
+class NullChunkHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        self.rfile.read(length)
+        payload = ("data: null\n\n"
+                   + sse({"content": "still"})
+                   + "data: null\n\n"
+                   + sse({"content": " here"})
+                   + "data: [DONE]\n\n").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *a):
+        pass
+
+
+nserver = HTTPServer(("127.0.0.1", 0), NullChunkHandler)
+threading.Thread(target=nserver.serve_forever, daemon=True).start()
+nclient = ChatClient("http://127.0.0.1:%d/v1" % nserver.server_port,
+                     "fake-key", "fake-model")
+nout = nclient.chat_stream([{"role": "user", "content": "hi"}])
+nserver.shutdown()
+check("null chunks in the stream are skipped",
+      nout.get("content") == "still here")
+
+sbodies = stream_seen["bodies"]
+sechoed = [m for m in sbodies[1]["messages"]
+           if m.get("role") == "assistant" and m.get("tool_calls")] \
+    if len(sbodies) > 1 else []
+check("streamed tool calls keep the type tag",
+      len(sechoed) > 0 and all(
+          tc.get("type") == "function"
+          for m in sechoed for tc in m["tool_calls"]))
 
 # --no-stream flag parsing
 
@@ -3143,7 +3318,9 @@ _old_no_color = os.environ.pop("NO_COLOR", None)
 ui_mod.init_color(True)
 check("brand is plain with --no-color", brand("x") == "x")
 check("panels are plain with --no-color",
-      tool_panel("n", "s") == "┌─ n\n│ s\n└─")
+      tool_panel("n", "s") == "╭─ n ──────────────╮\n"
+      "│ s                │\n"
+      "╰──────────────────╯")
 check("footer is plain with --no-color",
       status_footer("0.9.0", "m", 1234, 567, "$0.01")
       == "─" * 40 + "\nmule 0.9.0 | model m | 1,234 in / 567 out | $0.01")
@@ -3153,6 +3330,31 @@ if _old_no_color is not None:
     os.environ["NO_COLOR"] = _old_no_color
 ui_mod.init_color(bool(_old_no_color))
 check("brand wraps in amber with color on", _on_wrapped)
+
+from ui import run_banner, step_line, welcome_screen
+
+ui_mod.init_color(True)
+check("run banner carries version, model, root",
+      "mule 0.9.0" in run_banner("0.9.0", "m", "/r")
+      and "m" in run_banner("0.9.0", "m", "/r")
+      and "/r" in run_banner("0.9.0", "m", "/r"))
+check("step line shows tokens and cost",
+      step_line(3, 6808, 71, "$0.01")
+      == "  step 3 · 6,808 in / 71 out · $0.01")
+_w = welcome_screen("0.9.0", "m", "/r",
+                    ["s1 - 4 messages"], ["/help for commands"])
+check("welcome screen shows model, session, tip",
+      "mule v0.9.0" in _w and "s1 - 4 messages" in _w
+      and "/help for commands" in _w)
+check("welcome screen columns stay aligned",
+      len(set(len(l) for l in _w.splitlines()
+              if l.strip("┄").strip())) == 1)
+_prompts = []
+def _eof_read(p):
+    _prompts.append(p)
+    raise EOFError()
+repl_loop(_eof_read, lambda s: None, lambda l: None, lambda l: None)
+check("repl prompt is a bare > ", _prompts == ["> "])
 
 _spin = Spinner("thinking")
 _spin.tick()
@@ -3170,7 +3372,7 @@ with contextlib.redirect_stdout(_buf):
 check("tool calls render as panels",
       "run_shell" in _buf.getvalue()
       and "command=echo hi" in _buf.getvalue()
-      and "┌─" in _buf.getvalue())
+      and "╭─" in _buf.getvalue())
 
 _main_mod.ChatClient = _LogClient
 _buf = io.StringIO()

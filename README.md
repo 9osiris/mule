@@ -23,6 +23,16 @@ python main.py "summarize the repo layout" \
   --root ./myproject
 ```
 
+agentrouter works too (mule sends the client headers its waf wants):
+
+```bash
+python main.py "check this for errors" \
+  --base-url https://agentrouter.org/v1 \
+  --api-key $AGENTROUTER_API_KEY \
+  --model gpt-4o-mini \
+  --root ./myproject
+```
+
 ## flags
 
 - `task` - what to do (or pipe it on stdin)

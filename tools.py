@@ -370,7 +370,10 @@ class ToolSet:
                 "function": {
                     "name": name,
                     "description": t["description"],
-                    "parameters": {"type": "object", "properties": props},
+                    # required must be an explicit array: strict
+                    # gateways reject the schema when it is missing
+                    "parameters": {"type": "object", "properties": props,
+                                   "required": list(props)},
                 },
             })
         return out

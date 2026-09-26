@@ -20,6 +20,7 @@ from sessions import save_session, load_session, list_sessions, auto_name, \
     session_stats
 from tools import ToolSet
 from ui import init_color, red, yellow, banner_text, tool_panel, \
+    run_banner, step_line, welcome_screen, \
     status_footer, Spinner
 
 
@@ -624,7 +625,8 @@ def make_show(args):
             return
         for c in calls:
             a = json.loads(c["function"].get("arguments") or "{}")
-            summary = " ".join("%s=%s" % (k, str(v)[:60]) for k, v in a.items())
+            summary = "\n".join("%s=%s" % (k, str(v)[:60])
+                                for k, v in a.items())
             print(tool_panel(c["function"]["name"], summary))
     return show
 
@@ -646,9 +648,8 @@ def make_track(args, totals, model_box=None):
             totals["in"] += pin
             totals["out"] += pout
             if not args.quiet and not args.json and not args.print_mode:
-                print("  [step %d: %s in / %s out, %s]" % (
-                    step, "{:,}".format(pin), "{:,}".format(pout),
-                    fmt_cost(cost_for(model, pin, pout))))
+                print(step_line(step, pin, pout,
+                                fmt_cost(cost_for(model, pin, pout))))
         if args.max_cost is not None:
             spent = cost_for(model, totals["in"], totals["out"])
             if spent is not None and spent > args.max_cost:
@@ -787,6 +788,17 @@ def run_interactive(args, tools, system, messages, task,
     if task:
         # a task on the command line runs first, then the loop takes over
         on_task(task)
+    if not args.quiet:
+        from sessions import list_sessions
+        try:
+            recent = list_sessions()[-5:][::-1]
+        except OSError:
+            recent = []
+        tips = ["/help for commands, /quit to leave",
+                "/model NAME to switch models mid-session",
+                "wrap input in ``` blocks for multiline tasks"]
+        print(welcome_screen(__version__, ctx["model"],
+                             os.path.abspath(args.root), recent, tips))
     # persistent input history across sessions
     histfile = os.path.expanduser("~/.mule/history")
     os.makedirs(os.path.dirname(histfile), exist_ok=True)
@@ -1039,6 +1051,9 @@ def _run(args):
     try:
         if args.dry_run and not args.quiet and not args.json:
             print("dry run: tools will not be executed")
+        if not args.quiet and not args.json and not args.print_mode:
+            print(run_banner(__version__, model_box["model"],
+                             os.path.abspath(args.root)))
         messages = run(run_task, chat_fn, tools,
                        system_prompt=system,
                        max_steps=args.max_steps,

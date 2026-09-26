@@ -56,11 +56,66 @@ def banner_text(version, model):
 
 
 def tool_panel(name, summary):
-    # one tool call as a bordered panel, name in cyan
-    lines = [brand("┌─ ") + cyan(name)]
-    if summary:
-        lines.append("│ " + summary)
-    lines.append(brand("└─"))
+    # one tool call as a rounded panel, name in the title bar.
+    # plain text when color is off, so widths stay exact.
+    rows = [r for r in str(summary or "").splitlines()]
+    inner = max([len(name)] + [len(r) for r in rows] + [0])
+    w = min(70, max(inner + 4, len(name) + 6, 20))
+    top = "╭─ " + name + " " + "─" * (w - 5 - len(name)) + "╮"
+    out = [brand(top[:3]) + cyan(name)
+           + brand(top[3 + len(name):])]
+    for r in rows:
+        cell = r[:w - 4] + " " * (w - 4 - len(r[:w - 4]))
+        out.append(brand("│ ") + cell + brand(" │"))
+    out.append(brand("╰" + "─" * (w - 2) + "╯"))
+    return "\n".join(out)
+
+
+def run_banner(version, model, root):
+    # non-interactive startup: the mark, then version/model/root
+    return "%s\n  %s" % (
+        brand(MULE_HEAD),
+        dim("mule %s · %s · %s" % (version, model, root)))
+
+
+def step_line(step, tokens_in, tokens_out, cost):
+    # one dim line per step: number, tokens, cost
+    return dim("  step %d · %s in / %s out · %s" % (
+        step, "{:,}".format(tokens_in),
+        "{:,}".format(tokens_out), cost))
+
+
+def _cell(text, width):
+    # pad or cut one column cell, plain text only
+    text = str(text)[:width]
+    return text + " " * (width - len(text))
+
+
+def welcome_screen(version, model, root, recent, tips):
+    # repl welcome, claude-code style: banner and model on the
+    # left, recent sessions and tips stacked on the right,
+    # all inside one dashed border. color is applied to whole
+    # padded cells so the columns stay aligned.
+    w, lw, rw = 78, 33, 39
+    title = " mule v%s " % version
+    dash = w - 2 - len(title)
+    lines = [brand("┄" * (dash // 2) + title + "┄" * (dash - dash // 2))]
+    left = ["", "welcome back.", ""] + MULE_HEAD.splitlines()
+    left += ["", "model  " + model, "cwd    " + root]
+    right = ["recent activity"]
+    right += [r for r in list(recent)[:4]] or ["(no sessions yet)"]
+    right += ["... /sessions for more", "", "tips"]
+    right += list(tips)[:3]
+    for i in range(max(len(left), len(right))):
+        l = _cell(left[i] if i < len(left) else "", lw)
+        r = _cell(right[i] if i < len(right) else "", rw)
+        if 3 <= i < 3 + len(MULE_HEAD.splitlines()):
+            l = brand(l)
+        rt = right[i] if i < len(right) else ""
+        if rt in ("recent activity", "tips"):
+            r = brand(r)
+        lines.append("  " + l + "  " + r)
+    lines.append(brand("┄" * 76))
     return "\n".join(lines)
 
 

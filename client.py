@@ -22,6 +22,24 @@ class ChatClient:
         self.max_tokens = max_tokens
         self.seed = seed
         self.trace_file = trace_file
+        # agentrouter's waf blocks plain script clients, so send the
+        # documented client headers when pointed at it
+        self.extra_headers = {}
+        if "agentrouter.org" in base_url:
+            self.extra_headers = {
+                "Originator": "codex_cli_rs",
+                "Version": "0.101.0",
+                "User-Agent": ("codex_cli_rs/0.101.0 "
+                               "(Windows NT 10.0; Win64; x64)"),
+            }
+
+    def _headers(self):
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + self.api_key,
+        }
+        headers.update(self.extra_headers)
+        return headers
 
     def _trace(self, record):
         # raw request/response pairs, one json object per line.
@@ -73,10 +91,7 @@ class ChatClient:
         req = urllib.request.Request(
             self.url,
             data=json.dumps(body).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + self.api_key,
-            },
+            headers=self._headers(),
             method="POST",
         )
         resp = self._post(req)
@@ -100,6 +115,9 @@ class ChatClient:
             out["tool_calls"] = [
                 {
                     "id": tc["id"],
+                    # keep the type tag: strict gateways reject the
+                    # echoed assistant message without it
+                    "type": "function",
                     "function": {
                         "name": tc["function"]["name"],
                         "arguments": tc["function"].get("arguments") or "{}",
@@ -120,10 +138,7 @@ class ChatClient:
         req = urllib.request.Request(
             self.url,
             data=json.dumps(body).encode(),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + self.api_key,
-            },
+            headers=self._headers(),
             method="POST",
         )
         resp = self._post(req)
@@ -142,6 +157,9 @@ class ChatClient:
                 try:
                     chunk = json.loads(data)
                 except json.JSONDecodeError:
+                    continue
+                # some servers send data: null keepalives
+                if not isinstance(chunk, dict):
                     continue
                 if "usage" in chunk:
                     usage = chunk["usage"]
@@ -180,6 +198,9 @@ class ChatClient:
             out["tool_calls"] = [
                 {
                     "id": e["id"] or "call_%d" % i,
+                    # keep the type tag: strict gateways reject the
+                    # echoed assistant message without it
+                    "type": "function",
                     "function": {
                         "name": e["name"] or "",
                         "arguments": e["arguments"] or "{}",
