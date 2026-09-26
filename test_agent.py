@@ -1307,6 +1307,48 @@ check("on_step saw all three calls",
 check("loop finished after the batch",
       last_answer(mmsgs) == "all three ran")
 
+# checkpoints: tar the root, skip junk, restore brings files back
+
+import checkpoints
+from checkpoints import save_checkpoint, restore_checkpoint
+
+ckdir = tempfile.mkdtemp()
+checkpoints.checkpoint_dir = lambda: ckdir
+
+ckroot = tempfile.mkdtemp()
+open(os.path.join(ckroot, "app.py"), "w").write("v1\n")
+os.makedirs(os.path.join(ckroot, ".git"))
+open(os.path.join(ckroot, ".git", "junk"), "w").write("x")
+os.makedirs(os.path.join(ckroot, "__pycache__"))
+open(os.path.join(ckroot, "__pycache__", "a.pyc"), "w").write("x")
+
+cpath = save_checkpoint(ckroot, "before-change")
+check("checkpoint file written", os.path.isfile(cpath))
+
+import tarfile as tfmod
+names = tfmod.open(cpath, "r:gz").getnames()
+check("checkpoint has the project files",
+      any(n.endswith("app.py") for n in names))
+check("checkpoint skips .git",
+      not any(".git" in n for n in names))
+check("checkpoint skips pycache",
+      not any("__pycache__" in n for n in names))
+
+open(os.path.join(ckroot, "app.py"), "w").write("v2 broken\n")
+restore_checkpoint(ckroot, "before-change")
+check("restore brings the file back",
+      open(os.path.join(ckroot, "app.py")).read() == "v1\n")
+try:
+    restore_checkpoint(ckroot, "nope")
+    check("missing checkpoint raises", False)
+except ValueError:
+    check("missing checkpoint raises", True)
+
+check("--checkpoint parses",
+      parse_args(["t", "--checkpoint", "c1"]).checkpoint == "c1")
+check("--restore parses",
+      parse_args(["t", "--restore", "c1"]).restore == "c1")
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
