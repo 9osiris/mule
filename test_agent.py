@@ -3305,12 +3305,11 @@ check("/bug defaults the title", "title=bug%20report" in _bug_out2[0])
 # branding: banner, panels, footer, spinner
 
 import ui as ui_mod
-from ui import banner_text, tool_panel, status_footer, Spinner, brand, \
+from ui import tool_panel, status_footer, Spinner, brand, \
     SPINNER_FRAMES
 
-check("banner carries the mule head",
-      "\\__/" in banner_text("0.9.0", "m")
-      and "mule 0.9.0 - model m" in banner_text("0.9.0", "m"))
+check("run banner carries the mule head",
+      "\\__/" in ui_mod.run_banner("0.9.0", "m", "/r"))
 check("spinner frames are four distinct custom frames",
       len(SPINNER_FRAMES) == 4 and len(set(SPINNER_FRAMES)) == 4)
 
@@ -3388,7 +3387,8 @@ with contextlib.redirect_stdout(_buf):
                               "--root", tempfile.mkdtemp()])
 _main_mod.ChatClient = _real_client
 check("normal runs show the banner",
-      _rc == 0 and "mule 0.9.0 - model" in _buf.getvalue())
+      _rc == 0 and "mule 0.9.0" in _buf.getvalue()
+      and _buf.getvalue().count("\\__/") == 1)
 check("normal runs end with the status footer",
       "| 1 in / 1 out |" in _buf.getvalue())
 
@@ -3407,6 +3407,66 @@ with contextlib.redirect_stdout(_buf):
         _rc = _main_mod.main(["demo"])
 check("mule demo runs the loop with no api key",
       _rc == 0 and "demo done" in _buf.getvalue())
+
+# the active prompt is prompt.md, so it must carry the narration rule
+
+from agent import load_system_prompt, SYSTEM_PROMPT
+check("default system prompt narrates before tool batches",
+      "Narrate as you go" in load_system_prompt())
+check("builtin prompt narrates before tool batches",
+      "Narrate as you go" in SYSTEM_PROMPT)
+
+# startup prints one banner: the old "mule x.y.z - model ..." line is gone
+
+_demo_buf = io.StringIO()
+with contextlib.redirect_stdout(_demo_buf):
+    with contextlib.redirect_stderr(io.StringIO()):
+        _demo_rc = _main_mod.main(["demo"])
+_demo_out = _demo_buf.getvalue()
+check("startup shows the mule head exactly once",
+      _demo_rc == 0 and _demo_out.count("\\__/") == 1)
+check("old banner line is gone",
+      "mule 0.9.0 - model" not in _demo_out)
+
+# quiet output modes stay clean: no banner, no panels, no color
+
+_main_mod.ChatClient = _FakePrintClient
+
+
+def _run_quiet(argv):
+    b = io.StringIO()
+    with contextlib.redirect_stdout(b):
+        with contextlib.redirect_stderr(io.StringIO()):
+            rc = _main_mod.main(argv)
+    return rc, b.getvalue()
+
+
+_rc, _out = _run_quiet(["do it", "--print", "--api-key", "x",
+                        "--root", tempfile.mkdtemp()])
+check("--print stays clean", _rc == 0 and _out == "the answer\n"
+      and "\\__/" not in _out and "\033[" not in _out)
+_rc, _out = _run_quiet(["do it", "--json", "--api-key", "x",
+                        "--root", tempfile.mkdtemp()])
+check("--json prints only json",
+      _rc == 0 and json.loads(_out).get("answer") == "the answer"
+      and "\033[" not in _out)
+_rc, _out = _run_quiet(["do it", "--quiet", "--api-key", "x",
+                        "--root", tempfile.mkdtemp()])
+check("--quiet prints only the answer",
+      _rc == 0 and _out == "the answer\n" and "\\__/" not in _out)
+_rc, _out = _run_quiet(["do it", "--no-color", "--api-key", "x",
+                        "--root", tempfile.mkdtemp()])
+check("--no-color strips ansi", _rc == 0 and "\033[" not in _out)
+_old_nc = os.environ.get("NO_COLOR")
+os.environ["NO_COLOR"] = "1"
+_rc, _out = _run_quiet(["do it", "--api-key", "x",
+                        "--root", tempfile.mkdtemp()])
+if _old_nc is None:
+    del os.environ["NO_COLOR"]
+else:
+    os.environ["NO_COLOR"] = _old_nc
+check("NO_COLOR env strips ansi", _rc == 0 and "\033[" not in _out)
+_main_mod.ChatClient = _real_client
 
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))

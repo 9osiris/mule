@@ -322,7 +322,9 @@ and retries with exponential backoff on 429s and 5xxs. `cost.py`
 holds rough per-model pricing. `sessions.py` saves and resumes
 conversations as jsonl files under `~/.mule/sessions/` and exports
 them to markdown. `checkpoints.py` tars and restores project
-snapshots. `prompt.md` is the system prompt. `repl.py` runs the
+snapshots. `prompt.md` is the system prompt. it tells the model to narrate
+as it goes: one short line before each batch of tool calls, so
+the human can follow along. `repl.py` runs the
 `--interactive` prompt loop, its slash commands, and custom
 commands from `.mule/commands/`. `scaffold.py` powers `mule init`.
 `doctor.py` runs the `mule doctor` checklist. `complete.py`
@@ -397,7 +399,8 @@ script against them: `mule --print "task" || echo "failed: $?"`.
 ## the look
 
 mule has a face: a geometric mule head in bold amber opens every
-run, tool calls render as bordered panels, a spinner ticks while
+run, with the version, model, and project root on one line under
+it. tool calls render as bordered panels, a spinner ticks while
 the model thinks, and a footer closes the run with the model,
 token counts, and cost. full spec in `BRANDING.md`. `--no-color`
 (or the `NO_COLOR` env var) turns all of it off; `--print`,

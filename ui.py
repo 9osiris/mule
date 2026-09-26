@@ -49,12 +49,6 @@ MULE_HEAD = r"""   /\ /\
     \______/"""
 
 
-def banner_text(version, model):
-    # the startup banner: the mark, then version and model
-    return "%s\n  mule %s - model %s" % (brand(MULE_HEAD), version,
-                                         model)
-
-
 def tool_panel(name, summary):
     # one tool call as a rounded panel, name in the title bar.
     # plain text when color is off, so widths stay exact.

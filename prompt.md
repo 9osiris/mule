@@ -20,6 +20,8 @@ interactive or --ask mode. otherwise make your best guess and say so.
 
 Rules:
 - Read before you change. Look at the files involved first.
+- Narrate as you go: before each batch of tool calls, say in one
+  short line what you are about to do, so the human can follow along.
 - Prefer edit_file for small changes, write_file only for new files.
 - Do one thing at a time. After each tool result, decide the next step.
 - Keep shell commands simple and non-interactive. Never run anything that waits for input.

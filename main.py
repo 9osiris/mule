@@ -19,7 +19,7 @@ from sessions import save_session, load_session, list_sessions, auto_name, \
     latest_session, search_sessions, rename_session, delete_session, \
     session_stats
 from tools import ToolSet
-from ui import init_color, red, yellow, banner_text, tool_panel, \
+from ui import init_color, red, yellow, tool_panel, \
     run_banner, step_line, welcome_screen, \
     status_footer, Spinner
 
@@ -971,9 +971,6 @@ def _run(args):
     if not args.api_key:
         print(red("set OPENAI_API_KEY or pass --api-key"), file=sys.stderr)
         return 2
-
-    if not args.quiet and not args.json and not args.print_mode:
-        print(banner_text(__version__, args.model))
 
     client = ChatClient(args.base_url, args.api_key, args.model,
                         timeout=args.timeout, retries=args.retries,
