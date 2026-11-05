@@ -45,6 +45,63 @@ def _check_reachable():
         return False, "cannot reach %s: %s" % (base, e)
 
 
+def check_model_connectivity(base_url=None, timeout=5):
+    # minimal get against <base-url>/models, short timeout, no key sent.
+    # any http response counts as reachable, even a 401. fails clean
+    # offline and never hangs past the timeout.
+    if base_url is None:
+        from config import load_config
+        cfg = load_config()
+        base_url = os.environ.get("MULE_BASE_URL", cfg.get(
+            "base_url", "https://api.openai.com/v1"))
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        timeout = 5
+    timeout = min(max(timeout, 1), 10)
+    url = base_url.rstrip("/") + "/models"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        urllib.request.urlopen(req, timeout=timeout)
+        return True, "model api reachable at %s" % base_url
+    except Exception as e:
+        if hasattr(e, "code"):
+            return True, "model api reachable at %s (http %s)" \
+                % (base_url, e.code)
+        return False, "model api unreachable at %s: %s" % (base_url, e)
+
+
+_check_model_connectivity = check_model_connectivity
+
+
+def check_config_validity(paths=None):
+    # unknown keys and wrong value types in mule.json, per file.
+    # missing files are fine, broken json is a problem.
+    from config import HOME_CONFIG, LOCAL_CONFIG, validate_config
+    if paths is None:
+        paths = (HOME_CONFIG, LOCAL_CONFIG)
+    problems = []
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            problems.append("%s is not valid json" % path)
+            continue
+        if not isinstance(data, dict):
+            problems.append("%s must be a json object" % path)
+            continue
+        problems.extend(validate_config(data, source=path))
+    if not problems:
+        return True, "config valid"
+    return False, "; ".join(problems)
+
+
+_check_config_validity = check_config_validity
+
+
 def _check_root(root):
     if os.path.isdir(root):
         return True, "project root exists: %s" % os.path.abspath(root)
@@ -57,8 +114,10 @@ def run_doctor(root="."):
     checks = [
         _check_config(LOCAL_CONFIG, "local mule.json"),
         _check_config(HOME_CONFIG, "global mule.json"),
+        check_config_validity(),
         _check_key(),
         _check_reachable(),
+        check_model_connectivity(),
         _check_root(root),
     ]
     ok = True

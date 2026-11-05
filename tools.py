@@ -205,13 +205,19 @@ class BackupStore:
 class ToolSet:
     def __init__(self, root, confirm=None, ask=None, make_chat=None,
                  delegate_depth=0, max_delegates=3, confirm_critical=None,
-                 warn=None, allow_cmds=None, deny_cmds=None):
+                 warn=None, allow_cmds=None, deny_cmds=None,
+                 allow_secrets=False, allowed_roots=None):
         self.root = os.path.abspath(root)
         # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
         # allow_cmds skip the --ask prompt, deny_cmds cancel the skip
         self.allow_cmds = list(allow_cmds or [])
         self.deny_cmds = list(deny_cmds or [])
+        # allow_secrets off means writes carrying secret-shaped
+        # values are refused; --allow-secrets turns that off
+        self.allow_secrets = allow_secrets
+        # per-tool project roots, overriding the default root
+        self.allowed_roots = dict(allowed_roots or {})
         # confirm_critical(command) -> bool, needs the literal word "yes"
         self.confirm_critical = confirm_critical
         # warn(msg), called when file reads look like secrets
@@ -373,7 +379,33 @@ class ToolSet:
                                "body": "json string to post"},
                 "run": self.http_post,
             },
+            "delegate_many": {
+                "description": "run several subtasks in parallel, "
+                               "results come back in order",
+                "parameters": {"tasks": "json list of task strings"},
+                "run": self.delegate_many,
+            },
+            "remember": {
+                "description": "save a fact to the project memory file "
+                               "for later runs",
+                "parameters": {"fact": "one fact worth remembering"},
+                "run": self.remember,
+            },
+            "undo_file": {
+                "description": "restore a file to its content before "
+                               "the most recent edit",
+                "parameters": {"path": "relative path"},
+                "run": self.undo_file,
+            },
         }
+        # multi-level undo snapshots, one stack per toolset
+        from undo_stack import UndoStack
+        self.undo_stack = UndoStack()
+        # mega-wave tool modules import tools.py themselves, so
+        # they register here lazily, never at module top level
+        for _mod in ("search_tools", "git_tools", "testrun",
+                     "shell_session", "multiedit"):
+            __import__(_mod).register(self)
 
     def schemas(self):
         out = []
@@ -419,10 +451,28 @@ class ToolSet:
         except Exception as e:
             return "error: %s" % e
 
-    # path stays inside the project root or it doesn't happen
+    # path stays inside the project root or it doesn't happen.
+    # the realpath check catches symlinks pointing outside.
     def _resolve(self, path):
         full = os.path.abspath(os.path.join(self.root, path or "."))
         if os.path.commonpath([full, self.root]) != self.root:
+            raise ValueError("path escapes project root: %s" % path)
+        try:
+            from safety import resolve_within
+            resolve_within(path or ".", self.root)
+        except ValueError:
+            raise ValueError("path escapes project root: %s" % path)
+        except ImportError:
+            pass
+        return full
+
+    def resolve_for(self, tool_name, path):
+        # per-tool root override, else the default project root
+        from safety import allowed_roots_for
+        root = allowed_roots_for(tool_name, self.root,
+                                 self.allowed_roots)
+        full = os.path.abspath(os.path.join(root, path or "."))
+        if os.path.commonpath([full, root]) != root:
             raise ValueError("path escapes project root: %s" % path)
         return full
 
@@ -469,6 +519,11 @@ class ToolSet:
     def write_file(self, path, content=""):
         full = self._resolve(path)
         content = content or ""
+        if not self.allow_secrets:
+            from safety import check_write_content
+            ok, reason = check_write_content(content)
+            if not ok:
+                return "refused: %s" % reason
         old_text = ""
         if os.path.isfile(full):
             with open(full, "r", errors="replace") as f:
@@ -478,6 +533,7 @@ class ToolSet:
             return "declined: the write was not applied"
         if os.path.isfile(full):
             self.backups.stash(full)
+            self.undo_stack.snapshot(path, old_text)
         os.makedirs(os.path.dirname(full) or self.root, exist_ok=True)
         with open(full, "w") as f:
             f.write(content)
@@ -499,10 +555,16 @@ class ToolSet:
             return ("error: old string matches %d times in %s, "
                     "be more specific" % (count, path))
         new_data = data.replace(old, new or "", 1)
+        if not self.allow_secrets:
+            from safety import check_write_content
+            ok, reason = check_write_content(new_data)
+            if not ok:
+                return "refused: %s" % reason
         if not self._confirm_write("edit_file %s" % path, path,
                                    data, new_data):
             return "declined: the edit was not applied"
         self.backups.stash(full)
+        self.undo_stack.snapshot(path, data)
         with open(full, "w") as f:
             f.write(new_data)
         return "edited %s" % path
@@ -646,6 +708,65 @@ class ToolSet:
                 return "error: delegate failed: %s" % e
             answer = _agent_last(messages)
             return answer or "(the delegate said nothing)"
+
+    def delegate_many(self, tasks="[]"):
+        # fan N subtasks out in parallel, results come back in order
+        if not self.make_chat:
+            return "error: delegation is not wired up in this run"
+        if self.delegate_depth >= 1:
+            return "error: delegates cannot spawn their own delegates"
+        try:
+            items = json.loads(tasks or "[]")
+        except json.JSONDecodeError:
+            return "error: tasks was not valid json"
+        if not isinstance(items, list) or not items:
+            return "error: tasks must be a non-empty json list"
+        from delegation import fanout
+
+        def _make(task):
+            def _run_one():
+                with self._delegate_sem:
+                    sub = ToolSet(self.root, make_chat=self.make_chat,
+                                  delegate_depth=self.delegate_depth + 1)
+                    try:
+                        messages = _agent_run(task, self.make_chat(), sub,
+                                              max_steps=15)
+                    except Exception as e:
+                        raise RuntimeError("delegate failed: %s" % e)
+                    return (_agent_last(messages)
+                            or "(the delegate said nothing)")
+            return _run_one
+
+        pairs = [("delegate_%d" % (i + 1), _make(t))
+                 for i, t in enumerate(items)]
+        results = fanout("", pairs)
+        lines = []
+        for res in results:
+            if res["ok"]:
+                lines.append("%s:\n%s" % (res["name"], res["output"]))
+            else:
+                lines.append("%s: %s" % (res["name"], res["output"]))
+        return "\n\n".join(lines)
+
+    def remember(self, fact=""):
+        # save one fact to the project memory file for later runs
+        from memory import append_memory
+        line = append_memory(self.root, fact)
+        if not line:
+            return "error: empty fact, nothing saved"
+        return "remembered: %s" % line.strip()
+
+    def undo_file(self, path=""):
+        # restore a file to its content before the most recent edit
+        if not path:
+            return "error: no path given"
+        content = self.undo_stack.undo(path)
+        if content is None:
+            return "nothing to undo for %s" % path
+        full = self._resolve(path)
+        with open(full, "w") as f:
+            f.write(content)
+        return "restored %s to its previous content" % path
 
     def todo_write(self, todos="[]"):
         # the model rewrites its whole todo list each time it changes

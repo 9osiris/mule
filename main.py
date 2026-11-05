@@ -214,6 +214,22 @@ def build_parser(cfg):
                    metavar="CHARS",
                    help="cap tool results at CHARS chars, with a marker "
                         "showing what was cut (read_file gets 4x)")
+    p.add_argument("--system-file", default=None, metavar="FILE",
+                   help="load the system prompt from a file")
+    p.add_argument("--persona", default=None, metavar="NAME",
+                   help="run as a persona: a builtin name or a prompt file")
+    p.add_argument("--project-memory", action="store_true",
+                   default=cfg.get("project_memory", False),
+                   help="include the project MEMORY.md in the system prompt")
+    p.add_argument("--token-budget", type=int, default=None,
+                   metavar="TOKENS",
+                   help="stop the agent when total tokens exceed this")
+    p.add_argument("--allow-secrets", action="store_true",
+                   help="allow file writes containing secret-shaped values")
+    p.add_argument("--from-template", default=None, metavar="NAME",
+                   help="start from a saved session template")
+    p.add_argument("--fork-step", type=int, default=None, metavar="N",
+                   help="with --fork, keep only the first N messages")
     return p
 
 
@@ -230,6 +246,12 @@ def parse_args(argv=None):
             cfg.update(load_profile(known.profile))
         except ValueError as e:
             pre.error(str(e))
+    # $VAR expansion in config values, unknown vars left alone
+    try:
+        from profiles import expand_env_vars
+        cfg = expand_env_vars(cfg)
+    except ImportError:
+        pass
     parser = build_parser(cfg)
     parser.add_argument("--profile", default=known.profile,
                         help="use a saved profile from ~/.mule/profiles/")
@@ -237,7 +259,7 @@ def parse_args(argv=None):
 
 
 SUBCOMMANDS = ("init", "config", "doctor", "completion", "models",
-               "sessions", "serve", "help", "examples", "demo")
+               "sessions", "serve", "help", "examples", "demo", "eval")
 
 
 def run_subcommand(name, rest):
@@ -246,14 +268,25 @@ def run_subcommand(name, rest):
         from scaffold import init_project
         force = "--force" in rest
         target = next((a for a in rest if not a.startswith("-")), ".")
+        template = None
+        if "--template" in rest:
+            i = rest.index("--template")
+            if i + 1 < len(rest):
+                template = rest[i + 1]
         try:
-            created = init_project(target, force=force)
-        except FileExistsError as e:
+            if template:
+                from scaffold import scaffold_project
+                created = scaffold_project(template, target)
+            else:
+                created = init_project(target, force=force)
+        except (FileExistsError, ValueError) as e:
             print(red("error: %s" % e), file=sys.stderr)
             return EXIT_ERROR
         for path in created:
             print("created %s" % path)
         return 0
+    if name == "eval":
+        return cmd_eval(rest)
     if name == "config":
         return cmd_config(rest)
     if name == "doctor":
@@ -422,11 +455,63 @@ def cmd_help(rest):
     return 0
 
 
+def cmd_eval(rest):
+    # mule eval TASKS.json: run the agent against a task file
+    # and score it. exit 0 when every task passes, 1 otherwise.
+    import argparse
+    p = argparse.ArgumentParser(
+        description="run the agent against eval tasks and score them")
+    p.add_argument("tasks", help="json file with eval tasks")
+    p.add_argument("--model",
+                   default=os.environ.get("MULE_MODEL", "gpt-4o-mini"))
+    p.add_argument("--base-url",
+                   default=os.environ.get(
+                       "MULE_BASE_URL", "https://api.openai.com/v1"))
+    p.add_argument("--api-key",
+                   default=os.environ.get("OPENAI_API_KEY", ""))
+    p.add_argument("--root", default=".")
+    p.add_argument("--max-steps", type=int, default=25)
+    p.add_argument("--json", action="store_true",
+                   help="print the benchmark as json")
+    a = p.parse_args(rest)
+    from eval import load_tasks, run_benchmark, format_report
+    try:
+        tasks = load_tasks(a.tasks)
+    except (ValueError, OSError) as e:
+        print(red("error: %s" % e), file=sys.stderr)
+        return EXIT_ERROR
+    if not a.api_key:
+        print(red("set OPENAI_API_KEY or pass --api-key"), file=sys.stderr)
+        return 2
+    client = ChatClient(a.base_url, a.api_key, a.model)
+    tools = ToolSet(a.root)
+    ns = argparse.Namespace(stop=None, print_mode=True, quiet=True,
+                            json=True, no_stream=True, model=a.model,
+                            fallback_models=None, fallback_model=None)
+    chat_fn = make_chat_fn(ns, client)
+
+    def run_fn(text):
+        messages = run(text, chat_fn, tools, max_steps=a.max_steps)
+        return last_answer(messages)
+
+    bench = run_benchmark(tasks, run_fn)
+    if a.json:
+        print(json.dumps(bench, indent=2, default=str))
+    else:
+        print(format_report(bench))
+    return 0 if bench["passed"] == bench["total"] else 1
+
+
 def cmd_sessions(rest):
-    # mule sessions list | rename OLD NEW | rm NAME | stats
-    if not rest or rest[0] not in ("list", "rename", "rm", "stats"):
-        print("usage: mule sessions list | rename OLD NEW | rm NAME | stats",
-              file=sys.stderr)
+    # mule sessions list | rename OLD NEW | rm NAME | stats |
+    #   export NAME md|html [PATH] | diff A B | cost [NAME] |
+    #   templates | fork-at NAME NEW STEP
+    if not rest or rest[0] not in ("list", "rename", "rm", "stats",
+                                   "export", "diff", "cost", "templates",
+                                   "fork-at"):
+        print("usage: mule sessions list | rename OLD NEW | rm NAME | stats "
+              "| export NAME md|html [PATH] | diff A B | cost [NAME] "
+              "| templates | fork-at NAME NEW STEP", file=sys.stderr)
         return 2
     action = rest[0]
     try:
@@ -455,6 +540,58 @@ def cmd_sessions(rest):
             for r in rows:
                 print("%-24s %4d messages %8d bytes"
                       % (r["name"], r["messages"], r["bytes"]))
+        elif action == "export":
+            if len(rest) < 3 or rest[2] not in ("md", "html"):
+                print("usage: mule sessions export NAME md|html [PATH]",
+                      file=sys.stderr)
+                return 2
+            from session_report import export_markdown, export_html
+            text = (export_markdown(rest[1]) if rest[2] == "md"
+                    else export_html(rest[1]))
+            if len(rest) > 3:
+                with open(rest[3], "w") as f:
+                    f.write(text)
+                print("exported: %s" % rest[3])
+            else:
+                print(text)
+        elif action == "diff":
+            if len(rest) < 3:
+                print("usage: mule sessions diff A B", file=sys.stderr)
+                return 2
+            from session_report import diff_sessions
+            print(diff_sessions(rest[1], rest[2]))
+        elif action == "cost":
+            from session_report import cost_report
+            names = rest[1:] or None
+            rep = cost_report(names)
+            for row in rep["sessions"]:
+                cost = ("$%.4f" % row["cost"]) if row["cost"] is not None \
+                    else "unknown pricing"
+                print("%-24s %4d messages %4d tool calls %s"
+                      % (row["name"], row["messages"],
+                         row["tool_calls"], cost))
+            total = rep["total"]
+            print("total: %d messages, %d tool calls, %s"
+                  % (total["messages"], total["tool_calls"],
+                     ("$%.4f" % total["cost"])
+                     if total["cost"] is not None else "unknown pricing"))
+        elif action == "templates":
+            from session_report import list_templates
+            for name in list_templates():
+                print(name)
+        elif action == "fork-at":
+            if len(rest) < 4:
+                print("usage: mule sessions fork-at NAME NEW STEP",
+                      file=sys.stderr)
+                return 2
+            from sessions import fork_at_step
+            try:
+                step = int(rest[3])
+            except ValueError:
+                print("error: STEP must be a number", file=sys.stderr)
+                return 2
+            path = fork_at_step(rest[1], rest[2], step)
+            print("forked: %s" % path)
     except ValueError as e:
         print(red("error: %s" % e), file=sys.stderr)
         return EXIT_ERROR
@@ -793,6 +930,9 @@ def make_track(args, totals, model_box=None):
             spent = cost_for(model, totals["in"], totals["out"])
             if spent is not None and spent > args.max_cost:
                 return True
+        if getattr(args, "token_budget", None) is not None:
+            if totals["in"] + totals["out"] > args.token_budget:
+                return "hit token budget"
         return False
     return track
 
@@ -980,16 +1120,29 @@ def run_interactive(args, tools, system, messages, task,
 
 
 def resolve_system(args):
-    # --system replaces the prompt, --system-prompt loads it from a
-    # file, otherwise prompt.md or the builtin. --append-system tacks
-    # extra instructions onto whichever one won. skills from
-    # .mule/skills/ go on the end.
+    # --system replaces the prompt, --system-file loads it from a
+    # file, --system-prompt loads it from a file too, otherwise
+    # prompt.md or the builtin. --append-system tacks extra
+    # instructions onto whichever one won. --persona prepends a
+    # role prompt. --project-memory appends the project MEMORY.md.
+    # skills from .mule/skills/ go on the end.
     if args.system:
         system = args.system
+    elif getattr(args, "system_file", None):
+        from promptfiles import load_system_file
+        system = load_system_file(args.system_file)
     else:
         system = load_system_prompt(args.system_prompt)
+    if getattr(args, "persona", None):
+        from personas import load_persona
+        system = load_persona(args.persona).rstrip() + "\n\n" + system
     if args.append_system:
         system = system.rstrip() + "\n\n" + args.append_system
+    if getattr(args, "project_memory", False):
+        from memory import memory_context
+        mem = memory_context(os.path.abspath(args.root), 4000)
+        if mem:
+            system = system.rstrip() + "\n\nproject memory:\n" + mem
     from skills import load_skills, skills_prompt
     block = skills_prompt(load_skills(
         os.path.join(os.path.abspath(args.root), ".mule", "skills")))
@@ -1082,7 +1235,8 @@ def _run(args):
                     allow_cmds=[p.strip() for p in args.allow_cmd.split(",")
                                 if p.strip()] if args.allow_cmd else [],
                     deny_cmds=[p.strip() for p in args.deny_cmd.split(",")
-                               if p.strip()] if args.deny_cmd else [])
+                               if p.strip()] if args.deny_cmd else [],
+                    allow_secrets=getattr(args, "allow_secrets", False))
     from plugins import load_plugins, load_external_tools
     plugin_tools, plugin_errors = load_plugins()
     for t in plugin_tools:
@@ -1107,6 +1261,16 @@ def _run(args):
         for e in ext_errors:
             say(args, "warning: %s" % e)
     apply_tool_gates(args, tools)
+    # capability gating: models without vision lose read_image,
+    # unknown models keep everything (all-true default)
+    try:
+        from budgets import unsupported_tools
+        for name in unsupported_tools(args.model, list(tools.tools)):
+            tools.disable_tool(name)
+            say(args, "note: %s disabled, %s has no vision"
+                       % (name, args.model))
+    except ImportError:
+        pass
     if args.undo:
         print(tools.undo_last())
         return 0
@@ -1135,7 +1299,7 @@ def _run(args):
             print(red("error: %s" % e), file=sys.stderr)
             return EXIT_ERROR
     if not task and not args.resume and not args.cont and not args.interactive \
-            and not args.import_:
+            and not args.import_ and not getattr(args, "from_template", None):
         print(red("give it a task, as an argument or on stdin"),
               file=sys.stderr)
         return 2
@@ -1149,7 +1313,11 @@ def _run(args):
                         max_tokens=args.max_tokens, seed=args.seed,
                         trace_file=args.trace, cache=args.cache)
     tools.make_chat = lambda: make_chat_fn(args, client)
-    system = resolve_system(args)
+    try:
+        system = resolve_system(args)
+    except (ValueError, OSError) as e:
+        print(red("error: %s" % e), file=sys.stderr)
+        return EXIT_ERROR
 
     messages = None
     if args.resume:
@@ -1160,12 +1328,19 @@ def _run(args):
             return EXIT_ERROR
     if args.fork and messages is None:
         # branch off a saved session: same start, but saving later
-        # needs an explicit name, so the original stays untouched
+        # needs an explicit name, so the original stays untouched.
+        # --fork-step keeps only the first N messages.
         try:
             messages = load_session(args.fork)
         except ValueError as e:
             print(red("error: %s" % e), file=sys.stderr)
             return EXIT_ERROR
+        if getattr(args, "fork_step", None) is not None:
+            if args.fork_step < 0:
+                print(red("error: --fork-step must be 0 or more"),
+                      file=sys.stderr)
+                return 2
+            messages = messages[:args.fork_step]
         if not args.quiet and not args.print_mode:
             say(args, "forked from session: %s" % args.fork)
     if args.import_ and messages is None:
@@ -1208,6 +1383,16 @@ def _run(args):
         if not args.quiet and not args.print_mode:
             say(args, "branched from session: %s as %s"
                       % (args.from_session, args.branch))
+    if getattr(args, "from_template", None) and messages is None:
+        # start from a saved session template's starter messages
+        from session_report import start_from_template
+        try:
+            messages = start_from_template(args.from_template)
+        except ValueError as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return EXIT_ERROR
+        if not args.quiet and not args.print_mode:
+            say(args, "started from template: %s" % args.from_template)
     if args.interactive and messages is None:
         messages = [{"role": "system", "content": system}]
 
@@ -1269,7 +1454,7 @@ def _run(args):
         messages = reflect_answer(args, chat_fn, messages, track, step_no)
         step_no += 1
         final = last_answer(messages)
-    exit_code = EXIT_BUDGET if final == "stopped: hit cost budget" \
+    exit_code = EXIT_BUDGET if final.startswith("stopped: hit ") \
         else EXIT_OK
     if args.schema and final and not final.startswith("stopped:"):
         messages = enforce_schema(args, chat_fn, messages, track, step_no)
@@ -1301,6 +1486,22 @@ def _run(args):
         export_session(args.export, messages, cost_line=cost_line)
         if not args.quiet:
             say(args, "exported: %s" % args.export)
+    # local-only run log: one jsonl line per run, never sent anywhere
+    try:
+        from session_report import append_run_log
+        append_run_log({
+            "task": (task or "")[:200],
+            "model": used_model,
+            "steps": sum(1 for m in messages
+                         if m.get("role") == "assistant"
+                         and m.get("tool_calls")),
+            "tokens_in": totals["in"],
+            "tokens_out": totals["out"],
+            "cost": cost_for(used_model, totals["in"], totals["out"]),
+            "outcome": final[:100] if final else "",
+        })
+    except Exception:
+        pass
 
     if args.json:
         print(json.dumps(build_result(args, messages, totals, model_box),

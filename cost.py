@@ -21,6 +21,12 @@ def cost_for(model, prompt_tokens, completion_tokens):
             + (completion_tokens or 0) / 1e6 * pout)
 
 
+def extend_pricing(model, pin, pout):
+    # add or replace a pricing row at runtime
+    PRICING[model] = (float(pin), float(pout))
+    return PRICING[model]
+
+
 def fmt_cost(cost):
     if cost is None:
         return "unknown pricing"

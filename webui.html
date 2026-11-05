@@ -266,7 +266,10 @@ details.tools summary .n{background:var(--bg-hover);border-radius:99px;
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
       <input id="q" type="text" placeholder="search chats" autocomplete="off">
     </div>
-    <div class="side-label">chats</div>
+    <div class="side-label" style="display:flex;align-items:center;justify-content:space-between">
+      <span>chats <span id="sesscount"></span></span>
+      <button class="iconbtn" id="sessrefresh" title="refresh session list">&#8635;</button>
+    </div>
     <div class="sess-list" id="sess"></div>
     <div class="side-label">files</div>
     <div class="tree" id="tree"></div>
@@ -291,6 +294,9 @@ details.tools summary .n{background:var(--bg-hover);border-radius:99px;
       <button class="pill" id="modelpill" title="change model">
         <span>model</span><span class="v" id="modelv">…</span>
       </button>
+      <span class="pill" id="costpill" title="tokens and cost for this page session">
+        <span>cost</span><span class="v" id="costv">0 in / 0 out</span>
+      </span>
       <button class="pill" id="robtn" title="toggle readonly mode">
         <span>readonly</span>
       </button>
@@ -449,11 +455,19 @@ function shortArgs(a){
 const S = {
   info: null, sessions: [], cur: null, running: false,
   theme: localStorage.getItem("mule-theme") || "light",
+  totals: {in: 0, out: 0, cost: ""},
 };
 document.documentElement.dataset.theme = S.theme;
+/* auth token from the page url, passed on every api call */
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
+function apiUrl(path){
+  if (!TOKEN) return path;
+  return path + (path.includes("?") ? "&" : "?") +
+    "token=" + encodeURIComponent(TOKEN);
+}
 
 async function api(path, opts){
-  const r = await fetch(path, opts);
+  const r = await fetch(apiUrl(path), opts);
   const j = await r.json().catch(()=>({}));
   if (!r.ok) throw new Error(j.error || ("http " + r.status));
   return j;
@@ -506,6 +520,7 @@ function finishTools(d){
   if (s) s.outerHTML = '<span style="color:var(--text-4)">&#10003;</span>';
 }
 function renderCost(w, info){
+  updateCost(info);
   let f = w.querySelector(".afoot");
   if (!f){
     f = el('<div class="afoot"><span class="meta"></span><span class="dot"></span></div>');
@@ -517,6 +532,16 @@ function renderCost(w, info){
   if (info.cost) bits.push(info.cost);
   f.querySelector(".meta").textContent = bits.join(" · ");
   return f;
+}
+/* cost display area: cumulative tokens and dollars */
+function updateCost(info){
+  if (!info) return;
+  S.totals.in += info.tokens_in || 0;
+  S.totals.out += info.tokens_out || 0;
+  if (info.cost) S.totals.cost = info.cost;
+  const bits = [S.totals.in + " in / " + S.totals.out + " out"];
+  if (S.totals.cost) bits.push(S.totals.cost);
+  $("costv").textContent = bits.join(" · ");
 }
 function renderDone(w, info){
   const f = renderCost(w, info);
@@ -544,6 +569,8 @@ function sessTitle(s){ return s.preview && s.preview !== "new chat" ? s.preview 
 function renderSessions(){
   const q = ($("q").value || "").toLowerCase();
   const box = $("sess"); box.innerHTML = "";
+  $("sesscount").textContent = S.sessions.length ?
+    "(" + S.sessions.length + ")" : "";
   const list = S.sessions.filter(s =>
     !q || s.id.toLowerCase().includes(q) ||
     (s.preview||"").toLowerCase().includes(q));
@@ -696,7 +723,7 @@ async function send(text, keep){
   w._tb = null;
   $("col").appendChild(w); scrollDown();
   try {
-    const r = await fetch("/api/chat", {method:"POST",
+    const r = await fetch(apiUrl("/api/chat"), {method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({message:text, session_id:S.cur})});
     if (!r.ok){
@@ -764,6 +791,7 @@ $("newchat").onclick = () => {
 };
 $("menubtn").onclick = () => $("side").classList.toggle("open");
 $("q").addEventListener("input", renderSessions);
+$("sessrefresh").onclick = () => loadSessions();
 document.addEventListener("click", e => {
   const b = e.target.closest("[data-code]");
   if (b){

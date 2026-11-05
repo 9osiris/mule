@@ -129,16 +129,33 @@ python main.py "check this for errors" \
 - `--trace FILE` - write raw api request/response pairs to FILE as
   jsonl (the api key is never recorded)
 - `--version` - print the version and exit
+- `--system-file FILE` - load the system prompt from this file
+  (beats `--system-prompt`, loses to `--system`)
+- `--persona NAME` - run as a builtin persona (careful reviewer,
+  terse implementer, explainer, tester, planner) or a prompt file;
+  the persona text goes in front of the system prompt
+- `--project-memory` - append the project `MEMORY.md` to the system
+  prompt, so the agent starts with what past runs learned
+- `--token-budget N` - stop the loop when total tokens pass N
+  (same stop path as `--max-cost`, exit code 2)
+- `--allow-secrets` - allow file writes containing secret-shaped
+  values; by default those writes are refused
+- `--from-template NAME` - start from a saved session template's
+  starter messages
+- `--fork-step N` - with `--fork`, keep only the first N messages
+  of the parent session
 
 exit codes: `0` ok, `2` cost budget hit or usage error, `3` runtime
 error, `130` you pressed ctrl-c.
 
 ## subcommands
 
-- `mule init [--force]` - scaffold a project: writes a starter
-  `mule.json`, a `prompt.md` template, an example command in
-  `.mule/commands/`, and an example task template in
+- `mule init [--force] [--template NAME]` - scaffold a project:
+  writes a starter `mule.json`, a `prompt.md` template, an example
+  command in `.mule/commands/`, and an example task template in
   `.mule/templates/`. refuses to overwrite unless `--force`.
+  `--template minimal|python-lib|web-app` picks a bigger skeleton
+  instead of the default starter.
 - `mule config [--global] get KEY | set KEY VALUE | unset KEY | list`
   - read and write config values from the cli. writes the local
   `mule.json` by default, `--global` targets `~/.config/mule/mule.json`.
@@ -154,11 +171,27 @@ error, `130` you pressed ctrl-c.
   `cost.py`, no api call needed.
 - `mule sessions rename OLD NEW | rm NAME | stats` - rename or
   delete a saved session, or show per-session message counts.
-- `mule serve [--port 8321] [--no-browser]` - local web chat ui:
-  sidebar with sessions, streaming markdown, tool calls shown as
-  a compact transcript. one self-contained page, no build step,
-  no external requests. bound to 127.0.0.1 only, shares every
-  model/root flag with a normal run.
+- `mule sessions export NAME md|html [PATH]` - render a session
+  as markdown or a self-contained html report (prints to stdout
+  without PATH).
+- `mule sessions diff A B` - unified diff of two sessions' turns.
+- `mule sessions cost [NAME]` - per-session and total message,
+  tool call, and cost counts (cost only when usage was recorded).
+- `mule sessions templates` - list saved session templates.
+- `mule sessions fork-at NAME NEW STEP` - copy the first STEP
+  messages of NAME into a new session NEW.
+- `mule serve [--port 8321] [--no-browser] [--auth-token TOKEN]` -
+  local web chat ui: sidebar with sessions, streaming markdown,
+  tool calls shown as a compact transcript. one self-contained
+  page, no build step, no external requests. bound to 127.0.0.1
+  only, shares every model/root flag with a normal run. with
+  `--auth-token` (or MULE_SERVE_TOKEN), every `/api/*` route
+  needs `?token=` or a bearer header.
+- `mule eval TASKS.json` - run the agent against a json task file
+  (each task: `name`, `task`, `expect` substrings, optional
+  `verify_command` and `max_steps`) and print a pass/fail report
+  with the aggregate pass rate. exit 0 when everything passes.
+  `--json` prints the benchmark as json instead.
 - `mule help tools|config|sessions|serve|examples` - topic help.
 - `mule examples` - copy-pasteable example invocations.
 - `mule demo` - run the whole loop against a fake local model, no
@@ -430,6 +463,24 @@ system prompt. `plugins.py` loads python tool plugins from
 - `read_image` - load a png/jpg/gif/webp as a base64 data uri
 - `delegate` - hand a subtask to a subagent with its own history,
   returns a summary (subagents can't delegate further)
+- `delegate_many` - run several subtasks in parallel, results
+  come back in order
+- `remember` - save a fact to the project `MEMORY.md` for later
+  runs (`--project-memory` reads it back)
+- `undo_file` - restore a file to its content before the most
+  recent edit (multi-level, per file)
+- `ast_search` - find python definitions by name pattern, with
+  file:line results
+- `web_search2` - web search with an engine choice and a local
+  24h result cache
+- `git_commit` - stage and commit inside the project root,
+  refuses empty messages, conflicts, and dirty-tree surprises
+- `run_tests` - run a test command and get back passed/failed/
+  error counts plus failing test names
+- `shell_session` - a persistent shell session: cwd and exports
+  survive across calls; `shell_kill` closes one
+- `multi_edit` - apply a list of old/new pairs to one file in a
+  single all-or-nothing call
 - `jobs` - list background shell jobs with status and output preview
 - `job_output` - full output of a background job
 - `job_kill` - stop a running background job
@@ -456,6 +507,11 @@ on top of that:
 - when a file read looks like it contains secrets (api keys,
   tokens, private keys, `password = ...`), you get a loud warning
   before it goes to the model.
+- file writes carrying secret-shaped values are refused outright
+  unless you pass `--allow-secrets`.
+- paths are resolved through symlinks before the jail check, so a
+  symlink inside the root pointing outside it can't smuggle a
+  read or write past the boundary.
 - `--readonly` turns off every writing tool; `--no-network` turns
   off the network ones; `--allow-tools`/`--deny-tools` pick exactly
   which tools the model may call.
@@ -499,9 +555,14 @@ first place.
 ```bash
 python test_agent.py
 python test_serve.py
+python test_mega_tools.py test_mega_sessions.py test_mega_loop.py
+python test_mega_repl.py test_mega_serve.py test_mega_config.py
+python test_mega_safety.py test_mega_eval.py test_mega_integration.py
 ```
 
 spins a fake openai-compatible server locally and runs the full loop
 through it, no api key needed. `test_serve.py` boots the real web
 server on a temp port with a fake client and exercises every
-endpoint, including the sse chat stream.
+endpoint, including the sse chat stream. the `test_mega_*` files
+cover the mega wave: new tools, session reporting, loop helpers,
+repl/serve additions, config, safety, eval, and the wiring itself.

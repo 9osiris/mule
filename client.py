@@ -37,6 +37,14 @@ class ChatClient:
         self.timeout = timeout
         self.retries = retries
         self.backoff = backoff
+        # per-model adaptive backoff: same delays as before on a
+        # fresh model, longer waits after repeated rate limits
+        try:
+            from backoff import AdaptiveBackoff
+            self._adaptive = AdaptiveBackoff(base=backoff, factor=2.0,
+                                             jitter=0.0)
+        except ImportError:
+            self._adaptive = None
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.seed = seed
@@ -114,14 +122,23 @@ class ChatClient:
         # one post with retries on rate limits and server errors
         for attempt in range(self.retries + 1):
             try:
-                return urllib.request.urlopen(req, timeout=self.timeout)
+                resp = urllib.request.urlopen(req, timeout=self.timeout)
+                if self._adaptive is not None:
+                    self._adaptive.record_success(self.model)
+                return resp
             except urllib.error.HTTPError as e:
                 last = attempt == self.retries
                 if e.code not in RETRYABLE or last:
                     detail = e.read().decode(errors="replace")[:500]
                     raise RuntimeError("api error %d after %d attempt(s): %s"
                                        % (e.code, attempt + 1, detail))
-                time.sleep(self.backoff * (2 ** attempt))
+                if self._adaptive is not None:
+                    if e.code == 429:
+                        self._adaptive.record_rate_limit(self.model)
+                    time.sleep(self._adaptive.delay_for(self.model,
+                                                        attempt))
+                else:
+                    time.sleep(self.backoff * (2 ** attempt))
 
     def chat(self, messages, tools=None, stop=None):
         body = self._body(messages, tools, stop=stop)

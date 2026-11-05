@@ -5,8 +5,13 @@ import json
 import os
 import shlex
 import subprocess
+import time
 
 MAX_EXTERNAL_OUTPUT = 20000
+
+# loaded plugins, by name: file, tools, and load time. load_plugins
+# fills this in, reload_plugin refreshes one entry in place.
+_REGISTRY = {}
 
 
 def plugin_dir():
@@ -59,11 +64,43 @@ def load_plugins():
         if not fname.endswith(".py") or fname.startswith("_"):
             continue
         name = fname[:-3]
+        path = os.path.join(d, fname)
         try:
-            tools.extend(_load_one(name, os.path.join(d, fname)))
+            loaded = _load_one(name, path)
+            tools.extend(loaded)
+            _REGISTRY[name] = {"name": name, "file": path,
+                               "tools": loaded, "loaded_at": time.time()}
         except Exception as e:
+            _REGISTRY.pop(name, None)
             errors.append("plugin %s failed to load: %s" % (name, e))
     return tools, errors
+
+
+def plugin_meta(name):
+    # metadata for a loaded plugin: name, file, tool count, load time
+    entry = _REGISTRY.get(name)
+    if entry is None:
+        raise ValueError("no such loaded plugin: %s" % name)
+    return {"name": entry["name"], "file": entry["file"],
+            "tool_count": len(entry["tools"]),
+            "loaded_at": entry["loaded_at"],
+            "loaded_time": entry["loaded_at"]}
+
+
+def reload_plugin(name, plugins_dir=None):
+    # re-read the plugin file from disk and replace its tools
+    entry = _REGISTRY.get(name)
+    if entry is not None:
+        path = entry["file"]
+    else:
+        d = plugins_dir or plugin_dir()
+        path = os.path.join(d, name + ".py")
+    if not os.path.isfile(path):
+        raise ValueError("no such plugin file: %s" % path)
+    loaded = _load_one(name, path)
+    _REGISTRY[name] = {"name": name, "file": path,
+                       "tools": loaded, "loaded_at": time.time()}
+    return loaded
 
 
 def _external_command_ok(command, root):

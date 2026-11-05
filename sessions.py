@@ -119,6 +119,50 @@ def branch_parent(name):
     return None
 
 
+def _fork_meta_path(name):
+    # sidecar next to the session file, records the fork parent
+    # and the step it was cut at. the session file itself stays
+    # plain jsonl, one message per line, like every other session.
+    path = _path(name)
+    return path[:-6] + ".meta.json"
+
+
+def fork_at_step(name, new_name, step_index):
+    # copy a saved session truncated to step_index messages into
+    # a new named session. the parent name and step are recorded
+    # in a <new_name>.meta.json sidecar next to the new file.
+    # loading the fork returns the truncated history.
+    if new_name == name:
+        raise ValueError("cannot fork a session onto itself")
+    if not os.path.isfile(_path(name)):
+        raise ValueError("no such session: %s" % name)
+    if os.path.isfile(_path(new_name)):
+        raise ValueError("session already exists: %s" % new_name)
+    if isinstance(step_index, bool) or not isinstance(step_index, int):
+        raise ValueError("step_index must be an integer")
+    messages = load_session(name)
+    if step_index < 0 or step_index > len(messages):
+        raise ValueError("step_index %d out of range for %d messages"
+                         % (step_index, len(messages)))
+    save_session(new_name, messages[:step_index])
+    with open(_fork_meta_path(new_name), "w") as f:
+        json.dump({"parent": name, "step": step_index,
+                   "kind": "fork"}, f)
+    return _path(new_name)
+
+
+def fork_info(name):
+    # fork metadata for a session, or None when it is not a fork
+    try:
+        with open(_fork_meta_path(name)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("kind") == "fork":
+        return data
+    return None
+
+
 def rename_session(old, new):
     # rename a saved session file
     src, dst = _path(old), _path(new)

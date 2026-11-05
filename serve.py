@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -24,13 +25,17 @@ _chat_lock = threading.Lock()
 class Ctx:
     # everything a request handler needs: parsed args, the api
     # client, the tool set, and the system prompt.
-    def __init__(self, args, client, tools, system):
+    def __init__(self, args, client, tools, system, auth_token=None):
         self.args = args
         self.client = client
         self.tools = tools
         self.system = system
         self.stop = threading.Event()  # set by /api/stop, clears per chat
         self.brand = "mule 3.1"
+        # explicit arg wins, then args, then the environment
+        self.auth_token = (auth_token or
+                           getattr(args, "auth_token", None) or
+                           os.environ.get("MULE_SERVE_TOKEN") or None)
 
     def rebuild_tools(self, root):
         # fresh tool set pointed at a new project root, same gates
@@ -151,6 +156,64 @@ class Handler(BaseHTTPRequestHandler):
         return urllib.parse.parse_qs(
             urllib.parse.urlparse(self.path).query)
 
+    def _authorized(self):
+        # open when no token is configured, otherwise the token
+        # must arrive as ?token= or a bearer header
+        token = getattr(self.server.ctx, "auth_token", None)
+        if not token:
+            return True
+        q = self._query().get("token", [None])[0]
+        if q and q == token:
+            return True
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Bearer ") and auth[7:].strip() == token:
+            return True
+        return False
+
+    def _require_auth(self):
+        if not self._authorized():
+            self._json({"error": "unauthorized"}, 401)
+            return False
+        return True
+
+    def _job_store(self):
+        # the tool set owns the job store when it has one
+        tools = getattr(self.server.ctx, "tools", None)
+        if tools is None:
+            return None
+        return getattr(tools, "jobs", None)
+
+    def _job_kill(self, jid):
+        # prefer the job store, fall back to the job_kill tool
+        store = self._job_store()
+        if store is not None:
+            job = store.get(jid)
+            if job is None:
+                return None
+            if job.get("done"):
+                return False
+            # the job thread assigns proc just after start, so
+            # wait briefly for it before killing, else the kill
+            # lands on nothing and the job runs to completion
+            for _ in range(20):
+                if job.get("proc") or job.get("done"):
+                    break
+                time.sleep(0.05)
+            if job.get("done"):
+                return False
+            store.kill(jid)
+            return True
+        tools = getattr(self.server.ctx, "tools", None)
+        fn = getattr(tools, "job_kill", None) if tools else None
+        if not callable(fn):
+            return None
+        out = str(fn(id=str(jid)))
+        if out.startswith("error: no such job"):
+            return None
+        if "already finished" in out:
+            return False
+        return not out.startswith("error:")
+
     def do_GET(self):
         path = self._path()
         ctx = self.server.ctx
@@ -162,7 +225,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "webui.html not found next to "
                                      "serve.py; run mule serve from a "
                                      "source checkout"}, 500)
-        elif path == "/api/info":
+            return
+        if not self._require_auth():
+            return
+        if path.startswith("/api/jobs/") and path.endswith("/stream"):
+            self._handle_job_stream(path)
+            return
+        if path.startswith("/api/sessions/"):
+            sid = urllib.parse.unquote(path[len("/api/sessions/"):])
+            if not sid or "/" in sid:
+                self._json({"error": "missing id"}, 400)
+                return
+            try:
+                msgs = sessions.load_session(sid)
+            except ValueError:
+                self._json({"error": "no such session"}, 404)
+                return
+            self._json({"id": sid,
+                        "messages": _public_messages(msgs)})
+            return
+        if path == "/api/info":
             self._json({"version": ctx.args.version
                         if hasattr(ctx.args, "version") else "dev",
                         "brand": ctx.brand,
@@ -216,6 +298,59 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json({"error": "not found"}, 404)
 
+    def _handle_job_stream(self, path):
+        # sse: new output chunks, then a done event when it ends
+        parts = path.split("/")
+        try:
+            jid = int(parts[3])
+        except (IndexError, ValueError):
+            self._json({"error": "bad job id"}, 400)
+            return
+        store = self._job_store()
+        job = store.get(jid) if store is not None else None
+        if job is None:
+            self._json({"error": "no such job"}, 404)
+            return
+        self._sse_begin()
+        sent = 0
+        try:
+            while True:
+                out = job.get("output") or ""
+                if len(out) > sent:
+                    self._sse_emit({"type": "output",
+                                    "text": out[sent:]})
+                    sent = len(out)
+                if job.get("done"):
+                    self._sse_emit({"type": "done",
+                                    "output": out,
+                                    "returncode": job.get("returncode"),
+                                    "killed": bool(job.get("killed"))})
+                    return
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def do_DELETE(self):
+        path = self._path()
+        if not path.startswith("/api/"):
+            self._json({"error": "not found"}, 404)
+            return
+        if not self._require_auth():
+            return
+        if path.startswith("/api/sessions/"):
+            sid = urllib.parse.unquote(path[len("/api/sessions/"):])
+            if not sid or "/" in sid:
+                self._json({"error": "missing id"}, 400)
+                return
+            try:
+                sessions.delete_session(sid)
+            except ValueError:
+                self._json({"error": "no such session"}, 404)
+                return
+            self._json({"ok": True})
+            return
+        self._json({"error": "not found"}, 404)
+
     def _body(self):
         length = int(self.headers.get("Content-Length", 0))
         try:
@@ -226,6 +361,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self._path()
         ctx = self.server.ctx
+        if not self._require_auth():
+            return
+        if path.startswith("/api/jobs/") and path.endswith("/cancel"):
+            parts = path.split("/")
+            try:
+                jid = int(parts[3])
+            except (IndexError, ValueError):
+                self._json({"error": "bad job id"}, 400)
+                return
+            result = self._job_kill(jid)
+            if result is None:
+                self._json({"error": "no such job"}, 404)
+                return
+            if result is False:
+                self._json({"error": "job already finished"}, 409)
+                return
+            self._json({"ok": True, "id": jid})
+            return
         if path == "/api/chat":
             body = self._body()
             if body is None:
@@ -417,6 +570,7 @@ def cmd_serve(rest):
     from ui import red
     port = 8321
     no_browser = False
+    auth_token = os.environ.get("MULE_SERVE_TOKEN")
     rest = list(rest)
     cleaned = []
     i = 0
@@ -427,6 +581,9 @@ def cmd_serve(rest):
             except ValueError:
                 print("error: --port needs a number", file=sys.stderr)
                 return 2
+            i += 2
+        elif rest[i] == "--auth-token" and i + 1 < len(rest):
+            auth_token = rest[i + 1]
             i += 2
         elif rest[i] == "--no-browser":
             no_browser = True
@@ -446,7 +603,7 @@ def cmd_serve(rest):
                         max_tokens=args.max_tokens, seed=args.seed,
                         trace_file=args.trace)
     system = resolve_system(args)
-    ctx = Ctx(args, client, None, system)
+    ctx = Ctx(args, client, None, system, auth_token=auth_token)
     ctx.rebuild_tools(args.root)
     server = make_server(ctx, port)
     url = "http://127.0.0.1:%d/" % server.server_address[1]

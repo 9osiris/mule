@@ -140,7 +140,7 @@ server.shutdown()
 check("server got 2 chat requests", len(seen["bodies"]) == 2)
 check("first request carried tools + model",
       seen["bodies"][0]["model"] == "fake-model"
-      and len(seen["bodies"][0]["tools"]) == 25)
+      and len(seen["bodies"][0]["tools"]) == 35)
 
 # every tool schema carries an explicit required array:
 # strict gateways reject the schema when it is missing

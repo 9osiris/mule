@@ -7,6 +7,54 @@ import subprocess
 from cost import cost_for, fmt_cost
 from ui import dim, G
 
+# persistent repl history, capped so the file stays small
+HISTORY_PATH = os.path.expanduser("~/.mule/repl_history")
+HISTORY_MAX_LINES = 1000
+
+
+def append_history(line):
+    # best effort append, never raise into the repl
+    if line is None:
+        return
+    text = str(line)
+    if not text.strip():
+        return
+    try:
+        os.makedirs(os.path.dirname(HISTORY_PATH) or ".", exist_ok=True)
+        with open(HISTORY_PATH, "a") as f:
+            f.write(text.rstrip("\n") + "\n")
+        with open(HISTORY_PATH) as f:
+            lines = f.readlines()
+        if len(lines) > HISTORY_MAX_LINES:
+            with open(HISTORY_PATH, "w") as f:
+                f.writelines(lines[-HISTORY_MAX_LINES:])
+    except OSError:
+        pass
+
+
+def load_history():
+    # saved lines oldest first, empty list when nothing is there
+    try:
+        with open(HISTORY_PATH) as f:
+            return [l.rstrip("\n") for l in f]
+    except OSError:
+        return []
+
+
+def needs_continuation(text):
+    # unclosed ``` fence or a trailing backslash means more input
+    if text.count("```") % 2 == 1:
+        return True
+    if text.rstrip().endswith("\\"):
+        return True
+    return False
+
+
+def join_continued(lines):
+    # backslash-newline joins with nothing, fences keep newlines
+    out = "\n".join(lines)
+    return out.replace("\\\n", "")
+
 HELP_TEXT = """slash commands:
   /help        show this help
   /quit        exit the loop
@@ -21,6 +69,10 @@ HELP_TEXT = """slash commands:
   /compress    summarize history into a short recap
   /undo        restore the most recently changed file
   /bug [TEXT]  print a prefilled github issue url
+  /sessions    list saved sessions
+  /branch NAME --from PARENT   fork a saved session
+  /export NAME md|html   export a session transcript
+  /persona [NAME]   list personas or switch the system prompt
 extras:
   !CMD         run a shell command directly, no agent involved
   @PATH        attach a file's contents to your task
@@ -96,6 +148,32 @@ def parse_slash(line):
     return cmd, arg
 
 
+def _export_via_report(report, name, fmt, out_dir=None):
+    # session_report renders text: export_markdown / export_html
+    # return a string, which we write to a file and report.
+    # also accept a generic export(name, fmt) returning a path.
+    fn_name = "export_markdown" if fmt == "md" else "export_html"
+    fn = getattr(report, fn_name, None)
+    if callable(fn):
+        text = fn(name)
+        path = os.path.join(out_dir or ".", "%s.%s" % (name, fmt))
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+    for fn_name in ("export", "export_session", "render"):
+        fn = getattr(report, fn_name, None)
+        if callable(fn):
+            out = fn(name, fmt)
+            if isinstance(out, str) and "\n" in out:
+                path = os.path.join(out_dir or ".",
+                                    "%s.%s" % (name, fmt))
+                with open(path, "w") as f:
+                    f.write(out)
+                return path
+            return out
+    raise ValueError("session_report has no export function")
+
+
 def handle_slash(line, ctx):
     # ctx: write, tools, totals, model, save_fn, commands
     # returns "quit" to leave, "clear" to reset history,
@@ -168,6 +246,98 @@ def handle_slash(line, ctx):
                            if n not in ctx["tools"].disabled)
             write("\n".join("  %s - %s" % (n, ctx["tools"].tools[n]["description"])
                             for n in names))
+    elif cmd == "sessions":
+        try:
+            import sessions as _sessions
+            names = _sessions.list_sessions()
+        except OSError:
+            names = []
+        if not names:
+            write("(no saved sessions)")
+        else:
+            rows = []
+            for n in names:
+                try:
+                    parent = _sessions.branch_parent(n)
+                except Exception:
+                    parent = None
+                rows.append("  %s%s" % (n, " (branch of %s)" % parent
+                                        if parent else ""))
+            write("\n".join(rows))
+    elif cmd == "branch":
+        bits = arg.split()
+        if len(bits) < 2 or "--from" not in bits:
+            write("usage: /branch NAME --from PARENT")
+        else:
+            name = bits[0]
+            parent = bits[bits.index("--from") + 1] if (
+                bits.index("--from") + 1 < len(bits)) else ""
+            if not parent:
+                write("usage: /branch NAME --from PARENT")
+            else:
+                try:
+                    import sessions as _sessions
+                    path = _sessions.branch_session(name, parent)
+                    write("branched: %s" % path)
+                except ValueError as e:
+                    write("error: %s" % e)
+                except OSError as e:
+                    write("error: %s" % e)
+    elif cmd == "export":
+        bits = arg.split()
+        if len(bits) < 2:
+            write("usage: /export NAME md|html")
+        else:
+            name, fmt = bits[0], bits[1].lower()
+            if fmt not in ("md", "html"):
+                write("usage: /export NAME md|html")
+            else:
+                try:
+                    import session_report as _report
+                except ImportError:
+                    write("session export is not available: "
+                          "session_report module not found")
+                else:
+                    try:
+                        out = _export_via_report(
+                            _report, name, fmt,
+                            out_dir=ctx.get("export_dir"))
+                    except ValueError as e:
+                        write("error: %s" % e)
+                    except Exception as e:
+                        write("error: %s" % e)
+                    else:
+                        write("exported: %s" % out if out else
+                              "exported session: %s" % name)
+    elif cmd == "persona":
+        try:
+            import personas as _personas
+        except ImportError:
+            write("personas not available")
+        else:
+            if not arg:
+                try:
+                    names = _personas.list_personas()
+                except Exception as e:
+                    write("error: %s" % e)
+                else:
+                    if names:
+                        write("\n".join("  %s" % n for n in names))
+                    else:
+                        write("(no personas)")
+            else:
+                try:
+                    text = _personas.load_persona(arg)
+                except ValueError as e:
+                    write("error: %s" % e)
+                except Exception as e:
+                    write("error: %s" % e)
+                else:
+                    ctx["persona"] = arg
+                    ctx["persona_text"] = text
+                    if ctx.get("set_persona"):
+                        ctx["set_persona"](arg, text)
+                    write("persona: %s" % arg)
     elif cmd in commands:
         return ("run", commands[cmd])
     else:
@@ -194,6 +364,7 @@ def repl_loop(read_line, write, on_task, on_slash, prompt=None,
         except (EOFError, KeyboardInterrupt):
             write("")
             break
+        append_history(line)
         if line.strip().startswith("```"):
             buf = [line]
             while True:
@@ -201,10 +372,23 @@ def repl_loop(read_line, write, on_task, on_slash, prompt=None,
                     more = read_line("... ")
                 except (EOFError, KeyboardInterrupt):
                     more = "```"
+                append_history(more)
                 buf.append(more)
                 if more.strip().endswith("```") and len(buf) > 1:
                     break
             line = "\n".join(buf)
+        elif needs_continuation(line):
+            # trailing backslash or an unclosed fence opened
+            # mid-line: keep reading until the input closes
+            buf = [line]
+            while needs_continuation("\n".join(buf)):
+                try:
+                    more = read_line("... ")
+                except (EOFError, KeyboardInterrupt):
+                    break
+                append_history(more)
+                buf.append(more)
+            line = join_continued(buf)
         line = line.strip()
         if not line:
             continue
