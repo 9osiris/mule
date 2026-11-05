@@ -64,7 +64,7 @@ every run ends with a footer, not a bare cost line:
 
 ```
 ────────────────────────────────────────
-mule 0.9.0 | model gpt-4o-mini | 1,234 in / 567 out | $0.0012
+mule 0.10.0 | model gpt-4o-mini | 1,234 in / 567 out | $0.0012
 ```
 
 model, token counts, cost. the rule above it is brand amber.

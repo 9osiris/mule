@@ -3486,7 +3486,7 @@ with contextlib.redirect_stdout(_buf):
                               "--root", tempfile.mkdtemp()])
 _main_mod.ChatClient = _real_client
 check("normal runs show the banner",
-      _rc == 0 and "mule 0.9.0" in _buf.getvalue()
+      _rc == 0 and "mule " + __version__ in _buf.getvalue()
       and _buf.getvalue().count("\\__/") == 1)
 check("normal runs end with the status footer",
       "| 1 in / 1 out |" in _buf.getvalue())

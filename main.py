@@ -14,7 +14,7 @@ from config import load_config, load_profile, config_problems
 # 130 user pressed ctrl-c
 EXIT_OK, EXIT_BUDGET, EXIT_ERROR, EXIT_CANCELLED = 0, 2, 3, 130
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name, \
