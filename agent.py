@@ -2869,9 +2869,12 @@ def compact_messages(messages, chat, keep_last=10):
 def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         messages=None, usage_cb=None, on_todos=None, context_budget=None,
         dry_run=False, max_tools=None, time_limit=None, on_timing=None,
-        parallel_tools=False, tool_timeout=None, on_result=None):
+        parallel_tools=False, tool_timeout=None, on_result=None,
+        max_tool_output=None, tool_output_limits=None):
     """the loop. chat(messages) -> assistant message dict, tools is a ToolSet.
-    dry_run prints what would happen without executing any tool."""
+    dry_run prints what would happen without executing any tool.
+    max_tool_output caps every tool result; read_file gets 4x that
+    unless tool_output_limits says otherwise."""
     if messages is None:
         messages = [
             {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
@@ -2995,6 +2998,9 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         tool_count += len(runnable)
         results = ran + ["error: hit max tools (%d), call not executed"
                          % max_tools for _ in calls[len(runnable):]]
+        results = [_truncate_result(c["function"]["name"], r,
+                                    max_tool_output, tool_output_limits)
+                   for c, r in zip(calls, results)]
 
         if on_result:
             on_result(step + 1, calls, results)
@@ -3037,6 +3043,29 @@ def run(task, chat, tools, system_prompt=None, max_steps=25, on_step=None,
         "content": "stopped: hit max steps (%d)" % max_steps,
     })
     return messages
+
+
+def _tool_budget(name, max_tool_output, tool_output_limits):
+    # per-tool override wins, read_file gets a bigger budget
+    # by default, everything else uses the flat cap
+    if tool_output_limits and name in tool_output_limits:
+        return tool_output_limits[name]
+    if name == "read_file" and max_tool_output:
+        return max_tool_output * 4
+    return max_tool_output
+
+
+def _truncate_result(name, result, max_tool_output, tool_output_limits):
+    # overlong results get cut with a marker saying how much went
+    # missing, so the model knows it is not seeing the whole thing
+    text = str(result)
+    budget = _tool_budget(name, max_tool_output, tool_output_limits)
+    if budget is None or len(text) <= budget:
+        return text
+    cut = len(text) - budget
+    return (text[:budget]
+            + "\n...[truncated: %d chars cut, %d total]"
+            % (cut, len(text)))
 
 
 def _clean_reply(reply):

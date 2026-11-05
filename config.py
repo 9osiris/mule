@@ -5,8 +5,9 @@ import os
 KEYS = ("model", "base_url", "api_key", "max_steps", "timeout", "root",
         "retries", "context_budget", "ask", "reflect", "verbose",
         "parallel_tools", "readonly", "no_network", "allow_tools",
-        "deny_tools", "fallback_model", "max_tools", "time_limit",
-        "temperature")
+        "deny_tools", "fallback_model", "fallback_models", "max_tools",
+        "time_limit", "temperature", "max_tool_output", "allow_cmds",
+        "deny_cmds", "external_tools", "cache")
 HOME_CONFIG = os.path.expanduser("~/.config/mule/mule.json")
 LOCAL_CONFIG = "mule.json"
 
@@ -38,9 +39,11 @@ SCHEMA = {
     "context_budget": int, "ask": bool, "reflect": bool,
     "verbose": bool, "parallel_tools": bool, "readonly": bool,
     "no_network": bool, "allow_tools": str, "deny_tools": str,
-    "fallback_model": str, "max_tools": int,
+    "fallback_model": str, "fallback_models": list, "max_tools": int,
     "time_limit": (int, float), "temperature": (int, float),
     "log_file": str, "trace": str, "tool_timeout": (int, float),
+    "max_tool_output": int, "allow_cmds": str, "deny_cmds": str,
+    "external_tools": str, "cache": bool,
 }
 
 
@@ -51,6 +54,8 @@ def _want_name(want):
         return "an integer"
     if want is bool:
         return "true or false"
+    if want is list:
+        return "a list"
     return "a number"
 
 

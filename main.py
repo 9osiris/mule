@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 
@@ -18,7 +19,7 @@ from cost import cost_for, fmt_cost
 from repl import repl_loop, handle_slash, load_commands
 from sessions import save_session, load_session, list_sessions, auto_name, \
     latest_session, search_sessions, rename_session, delete_session, \
-    session_stats
+    session_stats, branch_session, branch_parent
 from tools import ToolSet
 from ui import init_color, red, yellow, get_renderer, ThreadSpinner, \
     args_summary, run_banner, step_line, \
@@ -84,6 +85,22 @@ def build_parser(cfg):
     p.add_argument("--ask", action="store_true",
                    default=cfg.get("ask", False),
                    help="ask for confirmation before shell commands and file writes")
+    p.add_argument("--allow-cmd", default=cfg.get("allow_cmds"),
+                   metavar="CMDS",
+                   help="comma-separated shell commands that skip the "
+                        "--ask prompt, e.g. 'git status,ls'")
+    p.add_argument("--deny-cmd", default=cfg.get("deny_cmds"),
+                   metavar="CMDS",
+                   help="comma-separated shell commands that always "
+                        "prompt, even when allowlisted")
+    p.add_argument("--external-tools", default=cfg.get("external_tools"),
+                   metavar="FILE",
+                   help="json file defining extra tools as shell "
+                        "commands, registered alongside the builtins")
+    p.add_argument("--cache", action="store_true",
+                   default=cfg.get("cache", False),
+                   help="mark the system prompt as a cacheable prefix "
+                        "where the provider supports prompt caching")
     p.add_argument("--undo", action="store_true",
                    help="restore the most recently changed file and exit")
     p.add_argument("--interactive", action="store_true",
@@ -126,6 +143,12 @@ def build_parser(cfg):
                    help="pick up the most recent session")
     p.add_argument("--fork", default=None, metavar="NAME",
                    help="branch off a saved session as a new run")
+    p.add_argument("--branch", default=None, metavar="NAME",
+                   help="create a named branch of a saved session "
+                        "(needs --from), later turns save to the branch")
+    p.add_argument("--from", dest="from_session", default=None,
+                   metavar="NAME",
+                   help="parent session for --branch")
     p.add_argument("--reflect", action="store_true",
                    default=cfg.get("reflect", False),
                    help="critique the final answer and improve it "
@@ -133,6 +156,9 @@ def build_parser(cfg):
     p.add_argument("--fallback-model", default=cfg.get("fallback_model"),
                    metavar="MODEL",
                    help="switch to this model if the primary keeps failing")
+    p.add_argument("--fallback-models", default=None, metavar="MODELS",
+                   help="comma-separated models to try in order when the "
+                        "primary fails, beats --fallback-model")
     p.add_argument("--stop", default=None, metavar="SEQS",
                    help="comma-separated stop sequences for the model")
     p.add_argument("--schema", default=None, metavar="FILE",
@@ -183,6 +209,11 @@ def build_parser(cfg):
                    default=cfg.get("tool_timeout"),
                    metavar="SECONDS",
                    help="kill the wait on any single tool call after SECONDS")
+    p.add_argument("--max-tool-output", type=int,
+                   default=_num(None, cfg.get("max_tool_output"), None, int),
+                   metavar="CHARS",
+                   help="cap tool results at CHARS chars, with a marker "
+                        "showing what was cut (read_file gets 4x)")
     return p
 
 
@@ -401,7 +432,11 @@ def cmd_sessions(rest):
     try:
         if action == "list":
             for name in list_sessions():
-                print(name)
+                parent = branch_parent(name)
+                if parent:
+                    print("%s (branch of %s)" % (name, parent))
+                else:
+                    print(name)
         elif action == "rename":
             if len(rest) < 3:
                 print("usage: mule sessions rename OLD NEW",
@@ -534,24 +569,63 @@ def load_template(root, name):
         return f.read()
 
 
+def _is_fallback_error(err):
+    # retryable api failures, after the client burned its own
+    # retries: rate limits, server errors, and auth failures.
+    # anything else (bad request, bad config) fails straight away.
+    m = re.search(r"api error (\d+)", str(err))
+    if not m:
+        return False
+    code = int(m.group(1))
+    return code == 429 or code >= 500 or code in (401, 403)
+
+
+def _fallback_list(args):
+    # --fallback-models wins, else the single --fallback-model,
+    # else the fallback_models list from config
+    raw = getattr(args, "fallback_models", None)
+    if raw:
+        if isinstance(raw, list):
+            return [str(m).strip() for m in raw if str(m).strip()]
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    if args.fallback_model:
+        return [args.fallback_model]
+    return []
+
+
 def make_chat_fn(args, client):
-    # wraps the client with --fallback-model: if the primary model
-    # raises, switch once and retry. model_box tracks which model
-    # actually answered, so cost math stays honest.
+    # wraps the client with the fallback list: when the primary
+    # model fails with a retryable error, each fallback model is
+    # tried in order before giving up. model_box tracks which
+    # model actually answered, so cost math stays honest.
     model_box = {"model": args.model, "fell_back": False}
 
     def _once(fn, messages, tools, **kw):
         try:
             return fn(messages, tools, **kw)
-        except RuntimeError:
-            if args.fallback_model and not model_box["fell_back"]:
+        except RuntimeError as e:
+            if not _is_fallback_error(e):
+                raise
+            last = e
+            for name in _fallback_list(args):
+                if name == model_box["model"]:
+                    continue
+                if not model_box["fell_back"]:
+                    say(args, "primary model failed, falling back to %s"
+                              % name)
+                else:
+                    say(args, "fallback model %s failed, trying %s"
+                              % (model_box["model"], name))
                 model_box["fell_back"] = True
-                model_box["model"] = args.fallback_model
-                client.model = args.fallback_model
-                say(args, "primary model failed, falling back to %s"
-                          % args.fallback_model)
-                return fn(messages, tools, **kw)
-            raise
+                model_box["model"] = name
+                client.model = name
+                try:
+                    return fn(messages, tools, **kw)
+                except RuntimeError as e2:
+                    if not _is_fallback_error(e2):
+                        raise
+                    last = e2
+            raise last
 
     def _wait_with_spinner(fn):
         # run fn on a thread while a delayed spinner runs: nothing
@@ -641,7 +715,7 @@ def say(args, msg):
 def build_result(args, messages, totals, model_box=None):
     # the machine-readable result for --json
     model = model_box["model"] if model_box else args.model
-    return {
+    result = {
         "answer": last_answer(messages),
         "steps": sum(1 for m in messages
                      if m.get("role") == "assistant" and m.get("tool_calls")),
@@ -650,6 +724,11 @@ def build_result(args, messages, totals, model_box=None):
         "tokens_out": totals["out"],
         "cost": cost_for(model, totals["in"], totals["out"]),
     }
+    if totals.get("cached"):
+        result["cached_tokens"] = totals["cached"]
+    if totals.get("cache_write"):
+        result["cache_write_tokens"] = totals["cache_write"]
+    return result
 
 
 def make_show(args):
@@ -688,14 +767,28 @@ def make_track(args, totals, model_box=None):
     def track(step, usage):
         # returns True when the cost budget is blown, stopping the loop
         model = model_box["model"] if model_box else args.model
+        if model_box is not None:
+            # which model served each step, for fallback runs
+            model_box.setdefault("served", {})[step] = model
         if usage:
             pin = usage.get("prompt_tokens", 0)
             pout = usage.get("completion_tokens", 0)
             totals["in"] += pin
             totals["out"] += pout
+            totals["cached"] = (totals.get("cached", 0)
+                                + (usage.get("cached_tokens") or 0))
+            totals["cache_write"] = (totals.get("cache_write", 0)
+                                     + (usage.get("cache_write_tokens")
+                                        or 0))
             if not args.quiet and not args.json and not args.print_mode:
                 print(step_line(step, pin, pout,
                                 fmt_cost(cost_for(model, pin, pout))))
+                if usage.get("cached_tokens") \
+                        or usage.get("cache_write_tokens"):
+                    print("  [cache: %s read / %s written]"
+                          % ("{:,}".format(usage.get("cached_tokens") or 0),
+                             "{:,}".format(usage.get("cache_write_tokens")
+                                           or 0)))
         if args.max_cost is not None:
             spent = cost_for(model, totals["in"], totals["out"])
             if spent is not None and spent > args.max_cost:
@@ -826,7 +919,8 @@ def run_interactive(args, tools, system, messages, task,
                                   usage_cb=track,
                                   on_todos=todos,
                                   context_budget=args.context_budget,
-                                  dry_run=args.dry_run)
+                                  dry_run=args.dry_run,
+                                  max_tool_output=args.max_tool_output)
         except RuntimeError as e:
             print(red("error: %s" % e))
             return
@@ -962,7 +1056,11 @@ def main(argv=None):
 def _run(args):
     if args.list_sessions:
         for name in list_sessions():
-            print(name)
+            parent = branch_parent(name)
+            if parent:
+                print("%s (branch of %s)" % (name, parent))
+            else:
+                print(name)
         return 0
 
     if args.search_sessions:
@@ -980,8 +1078,12 @@ def _run(args):
                     if (args.ask and not args.print_mode) else None,
                     ask=ask_user_cli
                     if ((args.interactive or args.ask)
-                        and not args.print_mode) else None)
-    from plugins import load_plugins
+                        and not args.print_mode) else None,
+                    allow_cmds=[p.strip() for p in args.allow_cmd.split(",")
+                                if p.strip()] if args.allow_cmd else [],
+                    deny_cmds=[p.strip() for p in args.deny_cmd.split(",")
+                               if p.strip()] if args.deny_cmd else [])
+    from plugins import load_plugins, load_external_tools
     plugin_tools, plugin_errors = load_plugins()
     for t in plugin_tools:
         if t["name"] in tools.tools:
@@ -991,6 +1093,19 @@ def _run(args):
         tools.tools[t["name"]] = t
     for e in plugin_errors:
         say(args, "warning: %s" % e)
+    if args.external_tools:
+        # json-defined tools run shell commands in the root, with
+        # the same sandboxing as run_shell
+        ext_tools, ext_errors = load_external_tools(args.external_tools,
+                                                    args.root)
+        for t in ext_tools:
+            if t["name"] in tools.tools:
+                say(args, "warning: external tool %s shadows a builtin, "
+                          "skipping" % t["name"])
+                continue
+            tools.tools[t["name"]] = t
+        for e in ext_errors:
+            say(args, "warning: %s" % e)
     apply_tool_gates(args, tools)
     if args.undo:
         print(tools.undo_last())
@@ -1032,7 +1147,7 @@ def _run(args):
                         timeout=args.timeout, retries=args.retries,
                         temperature=args.temperature,
                         max_tokens=args.max_tokens, seed=args.seed,
-                        trace_file=args.trace)
+                        trace_file=args.trace, cache=args.cache)
     tools.make_chat = lambda: make_chat_fn(args, client)
     system = resolve_system(args)
 
@@ -1077,6 +1192,22 @@ def _run(args):
             return EXIT_ERROR
         if not args.quiet and not args.print_mode:
             say(args, "continuing session: %s" % latest)
+    if args.branch and messages is None:
+        # a named branch: copy the parent's history, run on it,
+        # and save back to the branch name, never the parent
+        if not args.from_session:
+            print(red("error: --branch needs --from NAME"),
+                  file=sys.stderr)
+            return 2
+        try:
+            branch_session(args.branch, args.from_session)
+            messages = load_session(args.branch)
+        except ValueError as e:
+            print(red("error: %s" % e), file=sys.stderr)
+            return EXIT_ERROR
+        if not args.quiet and not args.print_mode:
+            say(args, "branched from session: %s as %s"
+                      % (args.from_session, args.branch))
     if args.interactive and messages is None:
         messages = [{"role": "system", "content": system}]
 
@@ -1122,7 +1253,8 @@ def _run(args):
                        time_limit=args.time_limit,
                        on_timing=timing,
                        parallel_tools=args.parallel_tools,
-                       tool_timeout=args.tool_timeout)
+                       tool_timeout=args.tool_timeout,
+                       max_tool_output=args.max_tool_output)
     except RuntimeError as e:
         print(red("error: %s" % e), file=sys.stderr)
         return EXIT_ERROR
@@ -1145,6 +1277,11 @@ def _run(args):
     if args.save:
         name = auto_name() if args.save == "auto" else args.save
         path = save_session(name, messages)
+        if not args.quiet:
+            say(args, "saved session: %s" % path)
+    elif args.branch:
+        # branched runs save back to the branch, never the parent
+        path = save_session(args.branch, messages)
         if not args.quiet:
             say(args, "saved session: %s" % path)
     else:

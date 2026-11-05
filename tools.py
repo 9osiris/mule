@@ -67,6 +67,19 @@ def _matches(patterns, text):
     return None
 
 
+def _cmd_match(patterns, command):
+    # glob patterns match the whole command, plain patterns match
+    # the command or its first words: "git status" also covers
+    # "git status --porcelain"
+    for pat in (patterns or []):
+        if any(c in pat for c in "*?["):
+            if fnmatch.fnmatch(command, pat):
+                return True
+        elif command == pat or command.startswith(pat + " "):
+            return True
+    return False
+
+
 def _ddg_results(page, limit=8):
     # parse duckduckgo lite html into (title, url, snippet) tuples
     links = re.findall(
@@ -192,10 +205,13 @@ class BackupStore:
 class ToolSet:
     def __init__(self, root, confirm=None, ask=None, make_chat=None,
                  delegate_depth=0, max_delegates=3, confirm_critical=None,
-                 warn=None):
+                 warn=None, allow_cmds=None, deny_cmds=None):
         self.root = os.path.abspath(root)
         # confirm(prompt) -> bool, asked before shell commands and file writes
         self.confirm = confirm
+        # allow_cmds skip the --ask prompt, deny_cmds cancel the skip
+        self.allow_cmds = list(allow_cmds or [])
+        self.deny_cmds = list(deny_cmds or [])
         # confirm_critical(command) -> bool, needs the literal word "yes"
         self.confirm_critical = confirm_critical
         # warn(msg), called when file reads look like secrets
@@ -516,8 +532,13 @@ class ToolSet:
             else:
                 return ("refused: %s needs the literal word 'yes' "
                         "in --ask mode, not running it" % critical)
-        elif self.confirm and not self.confirm(command):
-            return "declined: the command was not run"
+        elif self.confirm:
+            # allowlisted commands skip the prompt, unless a deny
+            # pattern also matches: deny beats allow
+            allowed = (_cmd_match(self.allow_cmds, command)
+                       and not _cmd_match(self.deny_cmds, command))
+            if not allowed and not self.confirm(command):
+                return "declined: the command was not run"
         if str(background).lower() in ("true", "1", "yes"):
             jid = self.jobs.start(command)
             return "job started: %d (use job_output %d to read it)" % (jid, jid)

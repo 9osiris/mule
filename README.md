@@ -86,14 +86,33 @@ python main.py "check this for errors" \
   together (results stay in order)
 - `--tool-timeout SEC` - cut off any single tool call after SEC
   seconds instead of waiting on it
+- `--max-tool-output CHARS` - cap tool results at CHARS chars, with
+  a marker showing how much was cut (read_file gets 4x)
 - `--reflect` - after answering, the model critiques and improves
   its own answer once
 - `--fallback-model NAME` - if the primary model errors, retry the
   failed call once on this model
+- `--fallback-models A,B` - like `--fallback-model`, but walk the
+  list in order on 429/5xx/auth failures until one answers
 - `--schema KEYS` - comma-separated keys the final answer must be a
   json object containing (the model gets one fix-up try)
 - `--fork NAME` - start from a saved session's history without
   touching the original
+- `--branch NAME --from PARENT` - copy a saved session into a new
+  named branch; later turns save to the branch, `--list-sessions`
+  shows it as `NAME (branch of PARENT)`
+- `--allow-cmd CMDS` - comma-separated shell commands that skip the
+  `--ask` prompt, e.g. `git status,ls`
+- `--deny-cmd CMDS` - commands that always prompt, even when
+  allowlisted (deny beats allow)
+- `--external-tools FILE` - json file defining extra tools as shell
+  commands (`name`, `description`, `command` with `{arg}`
+  placeholders, `parameters`, `timeout`). they register like
+  builtins, run inside the project root, and refuse commands
+  that point outside it
+- `--cache` - mark the system prompt as a cacheable prefix where
+  the provider supports prompt caching; cache read/write tokens
+  show up in the step lines and `--json` output when reported
 - `--search-sessions QUERY` - search saved sessions and exit
 - `--verbose` - show per-step timing and token lines
 - `--allow-tools LIST` - comma-separated tools the model may call,
@@ -155,8 +174,10 @@ or `mule -` reads it explicitly.
 over the global one. recognized keys: `model`, `base_url`,
 `api_key`, `max_steps`, `timeout`, `retries`, `context_budget`, `root`,
 `ask`, `reflect`, `verbose`, `parallel_tools`, `readonly`, `no_network`,
-`allow_tools`, `deny_tools`, `fallback_model`, `max_tools`, `time_limit`,
-`temperature`, `log_file`, `trace`, `tool_timeout`. unknown keys and
+`allow_tools`, `deny_tools`, `fallback_model`, `fallback_models`,
+`max_tools`, `time_limit`, `temperature`, `log_file`, `trace`,
+`tool_timeout`, `max_tool_output`, `allow_cmds`, `deny_cmds`,
+`external_tools`, `cache`. unknown keys and
 wrong types get a warning on stderr naming the file, the key, and
 what it should be.
 

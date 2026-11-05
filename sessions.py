@@ -84,6 +84,41 @@ def search_sessions(query):
     return hits
 
 
+def _branch_path(name):
+    # sidecar next to the session file, records the parent
+    path = _path(name)
+    return path[:-6] + ".branch"
+
+
+def branch_session(name, parent):
+    # fork a saved session: same history, new name, and a sidecar
+    # so listings can show the relationship. the parent is never
+    # touched, later turns in the branch stay in the branch.
+    if name == parent:
+        raise ValueError("cannot branch a session onto itself")
+    if not os.path.isfile(_path(parent)):
+        raise ValueError("no such session: %s" % parent)
+    if os.path.isfile(_path(name)):
+        raise ValueError("session already exists: %s" % name)
+    messages = load_session(parent)
+    save_session(name, messages)
+    with open(_branch_path(name), "w") as f:
+        json.dump({"parent": parent}, f)
+    return _path(name)
+
+
+def branch_parent(name):
+    # parent session name, or None when this is not a branch
+    try:
+        with open(_branch_path(name)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict):
+        return data.get("parent")
+    return None
+
+
 def rename_session(old, new):
     # rename a saved session file
     src, dst = _path(old), _path(new)

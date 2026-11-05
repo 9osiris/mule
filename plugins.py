@@ -1,6 +1,12 @@
-"""plugin tools: ~/.mule/plugins/*.py exposing get_tools()."""
+"""plugin tools: ~/.mule/plugins/*.py exposing get_tools(),
+plus json-defined external tools that run shell commands."""
 import importlib.util
+import json
 import os
+import shlex
+import subprocess
+
+MAX_EXTERNAL_OUTPUT = 20000
 
 
 def plugin_dir():
@@ -57,4 +63,97 @@ def load_plugins():
             tools.extend(_load_one(name, os.path.join(d, fname)))
         except Exception as e:
             errors.append("plugin %s failed to load: %s" % (name, e))
+    return tools, errors
+
+
+def _external_command_ok(command, root):
+    # the command itself must live inside the project root when
+    # it names a path. bare commands (echo, git) are fine, but
+    # /tmp/evil.sh or ../evil.sh is refused outright.
+    try:
+        parts = shlex.split(command or "")
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    first = parts[0]
+    if "/" not in first and "\\" not in first:
+        return True
+    full = first if os.path.isabs(first) else os.path.join(root, first)
+    return os.path.commonpath([os.path.abspath(full), root]) == root
+
+
+def _external_run(root, command, timeout, params, args):
+    # substitute {arg} placeholders, shell-quoted, then run
+    # inside the root with a timeout, like run_shell
+    if not _external_command_ok(command, root):
+        return ("error: external tool command escapes the project "
+                "root, refused")
+    cmd = command
+    for name in params:
+        cmd = cmd.replace("{%s}" % name,
+                          shlex.quote(str(args.get(name, ""))))
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=root,
+                              capture_output=True, text=True,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return "error: external tool timed out after %ss" % timeout
+    except OSError as e:
+        return "error: external tool failed to start: %s" % e
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if len(out) > MAX_EXTERNAL_OUTPUT:
+        out = out[:MAX_EXTERNAL_OUTPUT] + "\n...[truncated]"
+    return "exit %d\n%s" % (proc.returncode, out.rstrip() or "(no output)")
+
+
+def _make_external_runner(root, command, timeout, params):
+    def _run_tool(**args):
+        return _external_run(root, command, timeout, params, args)
+    return _run_tool
+
+
+def load_external_tools(path, root):
+    # json file: {"tools": [{name, description, command,
+    # parameters, timeout}]}. a top-level list works too.
+    # returns ([tool dicts], [error strings]).
+    root = os.path.abspath(root)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        return [], ["external tools file %s: %s" % (path, e)]
+    raw = data.get("tools") if isinstance(data, dict) else data
+    if not isinstance(raw, list):
+        return [], ["external tools file %s: expected a list of tools"
+                    % path]
+    tools, errors = [], []
+    for i, t in enumerate(raw):
+        if not isinstance(t, dict):
+            errors.append("external tool %d is not an object" % i)
+            continue
+        name, command = t.get("name", ""), t.get("command", "")
+        if not name or not command:
+            errors.append("external tool %d needs a name and a command"
+                          % i)
+            continue
+        params = t.get("parameters") or t.get("args") or {}
+        if isinstance(params, list):
+            params = {str(p): "" for p in params}
+        if not isinstance(params, dict):
+            errors.append("external tool %r parameters must be an object"
+                          % name)
+            continue
+        try:
+            timeout = float(t.get("timeout", 30))
+        except (TypeError, ValueError):
+            timeout = 30
+        timeout = min(max(timeout, 1), 300)
+        params = {str(k): str(v) for k, v in params.items()}
+        tools.append({
+            "name": str(name),
+            "description": str(t.get("description") or name),
+            "parameters": params,
+            "run": _make_external_runner(root, command, timeout, params),
+        })
     return tools, errors

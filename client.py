@@ -6,12 +6,31 @@ import urllib.error
 RETRYABLE = (429, 500, 502, 503, 504)  # rate limit or server blew up
 
 
+def _usage(usage):
+    # prompt/completion counts plus cache tokens when the
+    # provider reports them: openai nests them in details,
+    # anthropic-style providers send top-level fields
+    out = {
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+    }
+    details = usage.get("prompt_tokens_details") or {}
+    if details.get("cached_tokens") is not None:
+        out["cached_tokens"] = details["cached_tokens"]
+    if usage.get("cache_read_input_tokens") is not None:
+        out["cached_tokens"] = usage["cache_read_input_tokens"]
+    if usage.get("cache_creation_input_tokens") is not None:
+        out["cache_write_tokens"] = usage["cache_creation_input_tokens"]
+    return out
+
+
 class ChatClient:
     """talks to any openai-compatible /v1/chat/completions endpoint."""
 
     def __init__(self, base_url, api_key, model, timeout=120,
                  retries=3, backoff=1.0, temperature=None,
-                 max_tokens=None, seed=None, trace_file=None):
+                 max_tokens=None, seed=None, trace_file=None,
+                 cache=False):
         self.url = base_url.rstrip("/") + "/chat/completions"
         self.api_key = api_key
         self.model = model
@@ -22,6 +41,9 @@ class ChatClient:
         self.max_tokens = max_tokens
         self.seed = seed
         self.trace_file = trace_file
+        # prompt caching: mark the system prompt as a cacheable
+        # prefix. providers that ignore the marker behave the same.
+        self.cache = cache
         # agentrouter's waf blocks plain script clients, so send the
         # documented client headers when pointed at it
         self.extra_headers = {}
@@ -53,11 +75,27 @@ class ChatClient:
         except OSError:
             pass
 
+    def _cached_messages(self, messages):
+        # the system prompt becomes a content block carrying a
+        # cache_control marker. history itself is untouched: the
+        # marker is added fresh on every request.
+        out = []
+        for i, m in enumerate(messages):
+            if i == 0 and m.get("role") == "system":
+                content = m.get("content") or ""
+                if isinstance(content, str):
+                    m = dict(m)
+                    m["content"] = [{"type": "text", "text": content,
+                                     "cache_control": {"type": "ephemeral"}}]
+            out.append(m)
+        return out
+
     def _body(self, messages, tools=None, stop=None):
         # request body, sampling params only included when set
         body = {
             "model": self.model,
-            "messages": messages,
+            "messages": (self._cached_messages(messages)
+                         if self.cache else messages),
         }
         if tools:
             body["tools"] = tools
@@ -105,10 +143,7 @@ class ChatClient:
         self._trace({"request": body, "response": payload})
         usage = payload.get("usage") or {}
         if usage:
-            out["usage"] = {
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
-            }
+            out["usage"] = _usage(usage)
         if msg.get("content"):
             out["content"] = msg["content"]
         # thinking models return reasoning_content and require it
@@ -196,10 +231,7 @@ class ChatClient:
 
         out = {"role": "assistant"}
         if usage:
-            out["usage"] = {
-                "prompt_tokens": usage.get("prompt_tokens", 0),
-                "completion_tokens": usage.get("completion_tokens", 0),
-            }
+            out["usage"] = _usage(usage)
         content = "".join(content_parts)
         if content:
             out["content"] = content

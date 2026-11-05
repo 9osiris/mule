@@ -3818,6 +3818,320 @@ check("rich path streams tokens live and sets the flag",
       and _rr["content"] == "ab")
 _main_mod.get_renderer = _orig_get_renderer
 
+# multi-model fallback list: --fallback-models walks the list in
+# order on retryable errors, gives up cleanly when all fail
+
+class _ListClient:
+    # fails with a 429 on primary, a 500 on fb1, answers on fb2
+    def __init__(self):
+        self.model = "primary"
+        self.tried = []
+
+    def chat(self, messages, tools, stop=None):
+        self.tried.append(self.model)
+        if self.model == "primary":
+            raise RuntimeError("api error 429 after 4 attempt(s): slow down")
+        if self.model == "fb1":
+            raise RuntimeError("api error 500 after 4 attempt(s): boom")
+        return {"role": "assistant", "content": "answered by fb2"}
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_fb_list_args = parse_args(["t", "--no-stream",
+                            "--fallback-models", "fb1,fb2"])
+_fb_list_client = _ListClient()
+_fb_list_fn = make_chat_fn(_fb_list_args, _fb_list_client)
+_fb_list_reply = _fb_list_fn([{"role": "user", "content": "hi"}], [])
+check("--fallback-models walks the list in order",
+      _fb_list_client.tried == ["primary", "fb1", "fb2"])
+check("--fallback-models lands on the model that answered",
+      _fb_list_reply["content"] == "answered by fb2"
+      and _fb_list_fn.model_box["model"] == "fb2"
+      and _fb_list_fn.model_box["fell_back"] is True)
+
+
+class _DeadClient:
+    def __init__(self):
+        self.model = "primary"
+        self.tried = []
+
+    def chat(self, messages, tools, stop=None):
+        self.tried.append(self.model)
+        raise RuntimeError("api error 503 after 4 attempt(s): down")
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_fb_dead_args = parse_args(["t", "--no-stream",
+                            "--fallback-models", "fb1,fb2"])
+_fb_dead_client = _DeadClient()
+_fb_dead_fn = make_chat_fn(_fb_dead_args, _fb_dead_client)
+try:
+    _fb_dead_fn([{"role": "user", "content": "hi"}], [])
+    _fb_dead_raised = False
+except RuntimeError:
+    _fb_dead_raised = True
+check("--fallback-models gives up cleanly when all fail",
+      _fb_dead_raised and _fb_dead_client.tried == ["primary", "fb1", "fb2"])
+
+
+class _BadRequestClient:
+    def __init__(self):
+        self.model = "primary"
+        self.tried = []
+
+    def chat(self, messages, tools, stop=None):
+        self.tried.append(self.model)
+        raise RuntimeError("api error 400 after 1 attempt(s): bad input")
+
+    def chat_stream(self, messages, tools, on_token=None, stop=None):
+        return self.chat(messages, tools, stop=stop)
+
+
+_fb_bad_args = parse_args(["t", "--no-stream",
+                           "--fallback-models", "fb1,fb2"])
+_fb_bad_client = _BadRequestClient()
+_fb_bad_fn = make_chat_fn(_fb_bad_args, _fb_bad_client)
+try:
+    _fb_bad_fn([{"role": "user", "content": "hi"}], [])
+    _fb_bad_raised = False
+except RuntimeError:
+    _fb_bad_raised = True
+check("non-retryable errors skip the fallback list",
+      _fb_bad_raised and _fb_bad_client.tried == ["primary"])
+check("--fallback-models parses",
+      parse_args(["t", "--fallback-models", "a,b"]).fallback_models
+      == "a,b")
+_track_box = {"model": "primary"}
+_track_totals = {"in": 0, "out": 0}
+_track_fn = _main_mod.make_track(parse_args(["t", "--quiet"]),
+                                 _track_totals, _track_box)
+_track_fn(1, {"prompt_tokens": 1, "completion_tokens": 1})
+check("track logs which model served each step",
+      _track_box["served"][1] == "primary")
+
+# tool result truncation: --max-tool-output caps results with
+# a marker showing what was cut, read_file gets 4x the budget
+
+_trunc_root = tempfile.mkdtemp()
+_trunc_tools = ToolSet(_trunc_root)
+with open(os.path.join(_trunc_root, "big.txt"), "w") as _f:
+    _f.write("x" * 300)
+
+_trunc_script = [
+    {"role": "assistant", "tool_calls": [tool_call("t1", "run_shell",
+            {"command": "cat big.txt"})]},
+    {"role": "assistant", "tool_calls": [tool_call("t2", "read_file",
+            {"path": "big.txt"})]},
+    {"role": "assistant", "content": "done"},
+]
+_trunc_seen = {"steps": []}
+
+
+def _trunc_chat(messages, tools):
+    return _trunc_script.pop(0)
+
+
+def _trunc_result(step, calls, results):
+    _trunc_seen["steps"].append(results)
+
+
+_trunc_msgs = run("check truncation", _trunc_chat, _trunc_tools,
+                  system_prompt="t", max_steps=5,
+                  max_tool_output=100, on_result=_trunc_result)
+_trunc_tool_msgs = [m for m in _trunc_msgs if m["role"] == "tool"]
+check("long shell result truncated with cut count marker",
+      "[truncated: 207 chars cut, 307 total]" in _trunc_tool_msgs[0]["content"]
+      and len(_trunc_tool_msgs[0]["content"]) < 200)
+check("read_file override keeps a 300-char file under its 4x budget",
+      "[truncated:" not in _trunc_tool_msgs[1]["content"])
+check("truncation is visible in the run output callback",
+      "[truncated:" in _trunc_seen["steps"][0][0])
+
+_trunc_short = ToolSet(tempfile.mkdtemp())
+_trunc_short_msgs = run("x", lambda m, t: {"role": "assistant",
+    "tool_calls": [tool_call("s1", "list_dir", {"path": "."})]}
+    if not any(x.get("role") == "tool" for x in m)
+    else {"role": "assistant", "content": "done"},
+    _trunc_short, system_prompt="t", max_steps=5, max_tool_output=100)
+_trunc_short_tool = [m for m in _trunc_short_msgs if m["role"] == "tool"][0]
+check("short results pass through untouched",
+      "[truncated:" not in _trunc_short_tool["content"])
+check("--max-tool-output parses",
+      parse_args(["t", "--max-tool-output", "500"]).max_tool_output == 500)
+
+# session branching: --branch NAME --from PARENT copies history,
+# lists show the relationship, branch turns never leak back
+
+_branch_home = os.environ.get("HOME")
+os.environ["HOME"] = tempfile.mkdtemp()
+from sessions import branch_session, branch_parent, load_session
+save_session("base2", [{"role": "user", "content": "original task"},
+                       {"role": "assistant", "content": "original answer"}])
+branch_session("child", "base2")
+check("branch keeps parent history",
+      load_session("child") == load_session("base2"))
+check("branch parent is recorded",
+      branch_parent("child") == "base2"
+      and branch_parent("base2") is None)
+_child_msgs = load_session("child")
+_child_msgs.append({"role": "user", "content": "branch only"})
+save_session("child", _child_msgs)
+check("branch turns do not leak into the parent",
+      all("branch only" not in (m.get("content") or "")
+          for m in load_session("base2")))
+try:
+    branch_session("orphan", "no-such-session")
+    _branch_ok = False
+except ValueError:
+    _branch_ok = True
+check("branch of a missing session errors", _branch_ok)
+_branch_buf = io.StringIO()
+with contextlib.redirect_stdout(_branch_buf):
+    _branch_rc = _main_mod.main(["--list-sessions"])
+check("--list-sessions shows branch relationships",
+      _branch_rc == 0
+      and "child (branch of base2)" in _branch_buf.getvalue())
+check("--branch and --from parse",
+      parse_args(["t", "--branch", "c", "--from", "b"]).branch == "c"
+      and parse_args(["t", "--branch", "c", "--from", "b"]).from_session
+      == "b")
+if _branch_home is None:
+    os.environ.pop("HOME", None)
+else:
+    os.environ["HOME"] = _branch_home
+
+# shell allowlist for --ask: allowlisted commands skip the prompt,
+# non-matching commands still prompt, deny beats allow
+
+_never_confirm = lambda c: False
+_ts_allow = ToolSet(tempfile.mkdtemp(), confirm=_never_confirm,
+                    allow_cmds=["echo hello"])
+check("allowlisted command runs without prompting",
+      "hello" in _ts_allow.call("run_shell", {"command": "echo hello"}))
+check("non-matching command still prompts",
+      "declined" in _ts_allow.call("run_shell", {"command": "echo bye"}))
+check("allowlist prefix covers longer commands",
+      "hello" in _ts_allow.call("run_shell",
+                                {"command": "echo hello world"}))
+_ts_deny = ToolSet(tempfile.mkdtemp(), confirm=_never_confirm,
+                   allow_cmds=["echo"], deny_cmds=["echo hello"])
+check("deny beats allow",
+      "declined" in _ts_deny.call("run_shell", {"command": "echo hello"})
+      and "bye" in _ts_deny.call("run_shell", {"command": "echo bye"}))
+_ts_crit = ToolSet(tempfile.mkdtemp(), confirm=_never_confirm,
+                   allow_cmds=["rm -rf /"])
+check("allowlist never overrides the critical refusal",
+      "refused" in _ts_crit.call("run_shell", {"command": "rm -rf /"}))
+check("--allow-cmd and --deny-cmd parse",
+      parse_args(["t", "--allow-cmd", "git status,ls"]).allow_cmd
+      == "git status,ls"
+      and parse_args(["t", "--deny-cmd", "rm"]).deny_cmd == "rm")
+
+# mcp-style external tools: json-defined shell commands that
+# register like builtins, sandboxed to the root with timeouts
+
+_ext_root = tempfile.mkdtemp()
+_ext_file = os.path.join(_ext_root, "ext.json")
+with open(_ext_file, "w") as _f:
+    json.dump({"tools": [
+        {"name": "echoer", "description": "echoes back",
+         "command": "echo {text}", "parameters": {"text": "text to echo"}},
+        {"name": "sleeper", "description": "sleeps",
+         "command": "sleep 5", "parameters": {}, "timeout": 1},
+        {"name": "escapee", "description": "outside the root",
+         "command": "/tmp/evil.sh {x}", "parameters": {"x": "arg"}},
+    ]}, _f)
+from plugins import load_external_tools
+_ext_tools, _ext_errs = load_external_tools(_ext_file, _ext_root)
+check("external tools load from json",
+      len(_ext_tools) == 3 and not _ext_errs)
+_ext_ts = ToolSet(_ext_root)
+for _t in _ext_tools:
+    _ext_ts.tools[_t["name"]] = _t
+check("external echo tool registers and executes",
+      "hello" in _ext_ts.call("echoer", {"text": "hello"}))
+check("external tool shows up in schemas",
+      any(s["function"]["name"] == "echoer"
+          for s in _ext_ts.schemas()))
+check("external tool outside the root is refused",
+      "refused" in _ext_ts.call("escapee", {"x": "hi"}))
+check("external tool timeout is handled",
+      "timed out" in _ext_ts.call("sleeper", {}))
+check("--external-tools parses",
+      parse_args(["t", "--external-tools", "x.json"]).external_tools
+      == "x.json")
+
+# prompt caching: --cache marks the system prompt with a
+# cache_control marker, and cache tokens surface in usage
+
+from client import ChatClient, _usage
+_cache_msgs = [{"role": "system", "content": "sys"},
+               {"role": "user", "content": "hi"}]
+_cache_body = ChatClient("http://x/v1", "k", "m",
+                         cache=True)._body(_cache_msgs, [])
+_cache_block = _cache_body["messages"][0]["content"]
+check("cache markers present in the request body when --cache is on",
+      isinstance(_cache_block, list)
+      and _cache_block[0].get("cache_control") == {"type": "ephemeral"})
+check("cache markers absent when --cache is off",
+      ChatClient("http://x/v1", "k", "m")._body(
+          _cache_msgs, [])["messages"][0]["content"] == "sys")
+check("cache markers leave history untouched",
+      _cache_msgs[0]["content"] == "sys")
+check("cache token fields surfaced from openai-style usage",
+      _usage({"prompt_tokens": 100, "completion_tokens": 10,
+              "prompt_tokens_details": {"cached_tokens": 80}})
+      .get("cached_tokens") == 80)
+check("cache token fields surfaced from anthropic-style usage",
+      _usage({"prompt_tokens": 100, "completion_tokens": 10,
+              "cache_read_input_tokens": 70,
+              "cache_creation_input_tokens": 30})
+      == {"prompt_tokens": 100, "completion_tokens": 10,
+          "cached_tokens": 70, "cache_write_tokens": 30})
+
+_cache_seen = {"bodies": []}
+_cache_responses = [{"choices": [{"message": {
+    "role": "assistant", "content": "cached answer"}}],
+    "usage": {"prompt_tokens": 100, "completion_tokens": 10,
+              "prompt_tokens_details": {"cached_tokens": 80}}}]
+
+
+class _CacheHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers["Content-Length"])
+        _cache_seen["bodies"].append(json.loads(self.rfile.read(length)))
+        body = _cache_responses.pop(0)
+        data = json.dumps(body).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *a):
+        pass
+
+
+_cache_server = HTTPServer(("127.0.0.1", 0), _CacheHandler)
+_cache_port = _cache_server.server_port
+threading.Thread(target=_cache_server.serve_forever,
+                 daemon=True).start()
+_cache_client = ChatClient("http://127.0.0.1:%d/v1" % _cache_port,
+                           "k", "m", cache=True)
+_cache_reply = _cache_client.chat(_cache_msgs, [])
+_cache_server.shutdown()
+check("cache tokens reach the caller through a real request",
+      _cache_reply["usage"].get("cached_tokens") == 80)
+check("cache request body carries the marker end to end",
+      _cache_seen["bodies"][0]["messages"][0]["content"][0]
+      .get("cache_control") == {"type": "ephemeral"})
+check("--cache parses",
+      parse_args(["t", "--cache"]).cache is True)
+
 print()
 print("%d passed, %d failed" % (len(PASS), len(FAIL)))
 sys.exit(1 if FAIL else 0)
